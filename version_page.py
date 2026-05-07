@@ -1,4 +1,4 @@
-"""版本页：左侧任务列表 + 右侧教练/样例切换。"""
+"""版本页：左侧任务清单 + 右侧「AI 教练 / 样例库」Tab。"""
 from __future__ import annotations
 
 from PyQt6.QtCore import Qt, pyqtSignal
@@ -8,7 +8,7 @@ from PyQt6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QStackedWidget,
+    QTabWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -18,7 +18,7 @@ from sample_library import SampleLibraryWidget
 
 
 class VersionPage(QWidget):
-    """单个魔兽世界版本的交互页。"""
+    """单个题目版本的交互页（师圣晴主要负责美化与交互深化）。"""
 
     back_requested = pyqtSignal()
 
@@ -38,29 +38,20 @@ class VersionPage(QWidget):
             self._task_list.addItem(item)
         self._task_list.currentItemChanged.connect(self._on_task_changed)
 
-        self._stack = QStackedWidget()
         self._chat = ChatWidget(version_id, "task1")
         self._samples = SampleLibraryWidget()
         self._samples.set_context(version_id, "task1")
-        self._stack.addWidget(self._chat)
-        self._stack.addWidget(self._samples)
 
-        mode_row = QHBoxLayout()
-        btn_coach = QPushButton("AI 教练")
-        btn_samples = QPushButton("样例库")
-        btn_coach.clicked.connect(lambda: self._stack.setCurrentIndex(0))
-        btn_samples.clicked.connect(lambda: self._stack.setCurrentIndex(1))
-        mode_row.addWidget(btn_coach)
-        mode_row.addWidget(btn_samples)
-        mode_row.addStretch()
+        self._tabs = QTabWidget()
+        self._tabs.addTab(self._chat, "AI 教练")
+        self._tabs.addTab(self._samples, "样例库")
 
         left = QVBoxLayout()
         left.addWidget(QLabel("任务清单"))
         left.addWidget(self._task_list)
 
         right = QVBoxLayout()
-        right.addLayout(mode_row)
-        right.addWidget(self._stack)
+        right.addWidget(self._tabs)
 
         body = QHBoxLayout()
         body.addLayout(left, 1)

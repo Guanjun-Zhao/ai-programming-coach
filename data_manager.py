@@ -69,24 +69,27 @@ def load_samples() -> dict[str, Any]:
     同一进程内按文件的修改时间（纳秒 mtime）缓存解析结果，避免界面反复刷新时重复读盘与 json.loads；
     保存或替换 samples.json 后 mtime 变化会重新读取。
     """
-    global _SAMPLES_FILE_CACHE
-    if not SAMPLES_PATH.is_file():
-        _SAMPLES_FILE_CACHE = None
-        return {}
+    global _SAMPLES_FILE_CACHE  # 声明后才能在函数内给模块级缓存变量赋值
+    if not SAMPLES_PATH.is_file():  # Path.is_file()：路径存在且为普通文件时为 True
+        _SAMPLES_FILE_CACHE = None  # 无文件则清空缓存，避免沿用上次进程内曾加载过的 dict
+        return {}  # 调用方把「没有样例文件」与「空 JSON」都当成空 dict 处理
     try:
+        # stat() 取文件元数据；st_mtime_ns 为上次修改时间的纳秒整数，用作缓存版本号
         mtime_ns = SAMPLES_PATH.stat().st_mtime_ns
+        # 若缓存元组存在，且缓存里记录的 mtime 与磁盘当前一致，说明文件自上次解析后未改写
         if _SAMPLES_FILE_CACHE is not None and _SAMPLES_FILE_CACHE[0] == mtime_ns:
-            return _SAMPLES_FILE_CACHE[1]
+            return _SAMPLES_FILE_CACHE[1]  # 直接返回已解析好的 dict，不再读文件、不再 json.loads
+        # 缓存未命中或首次加载：整文件读入 str（utf-8 与 samples.json 保存约定一致）
         text = SAMPLES_PATH.read_text(encoding="utf-8")
-        if not text.strip():
-            parsed: dict[str, Any] = {}
+        if not text.strip():  # 文件只有空白或为空：等价于「空对象」，不必调用 json.loads("")
+            parsed: dict[str, Any] = {}  # 显式类型标注，便于类型检查器推断分支后的 parsed 形状
         else:
-            parsed = json.loads(text)
-        _SAMPLES_FILE_CACHE = (mtime_ns, parsed)
-        return parsed
-    except (json.JSONDecodeError, OSError):
-        _SAMPLES_FILE_CACHE = None
-        return {}
+            parsed = json.loads(text)  # 将 JSON 文本转为 Python dict（可嵌套 list/dict）
+        _SAMPLES_FILE_CACHE = (mtime_ns, parsed)  # 记下本次 mtime 与解析结果，供下次快速命中
+        return parsed  # 把内存中的样例库 dict 返回给 get_samples 等调用方
+    except (json.JSONDecodeError, OSError):  # JSONDecodeError：语法错；OSError：权限、磁盘等读失败
+        _SAMPLES_FILE_CACHE = None  # 解析失败不把半成品放进缓存，以免一直返回坏状态
+        return {}  # 静默降级为空 dict（与文件不存在时一致），界面表现为「暂无样例配置」
 
 
 def ensure_task_slot(data: dict[str, Any], version_id: str, task_id: str) -> dict[str, Any]:

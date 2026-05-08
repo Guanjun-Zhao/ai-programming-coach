@@ -10,11 +10,12 @@
 避免类型名与类定义顺序纠缠；不写也不影响程序运行。
 """
 
+# 推迟解析类型注解，便于写 dict[str, Any] 等而不必顾虑书写顺序（详见模块 docstring）
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from typing import Any
+import json  # 标准库：loads/dumps，把 dict/list 与 JSON 文本互转
+from pathlib import Path  # 路径对象：拼 data/*.json、判断是否存在；比字符串拼接更安全可读
+from typing import Any  # 标注「任意 JSON 兼容值」；本文件多处 dict[str, Any] 表示嵌套用户数据结构
 
 # 本文件所在目录 = 项目根目录（与 main.py 同级）
 ROOT_DIR = Path(__file__).resolve().parent

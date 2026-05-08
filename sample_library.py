@@ -8,9 +8,10 @@
 类型标注：见 `from __future__ import annotations`（与其它模块一致）。
 """
 
+# 推迟解析类型注解（与本项目其它模块一致；详见模块 docstring）
 from __future__ import annotations
 
-from typing import Any
+from typing import Any  # 样例条目为 JSON 对象，list[dict[str, Any]] 表示「键多为 str、值类型不定」
 
 # 第三方：PyQt6 控件与布局
 from PyQt6.QtWidgets import QLabel, QScrollArea, QVBoxLayout, QWidget

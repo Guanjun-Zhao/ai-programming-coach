@@ -5,8 +5,11 @@ AI 教练 Tab：只读历史区 + 输入框 + 发送；读写 user_data.json。
 1. QTextEdit 显示多轮对话；setReadOnly(True) 禁止用户直接改历史。
 2. 发送流程：读磁盘 → 追加用户消息 → 调 ai_coach.chat → 追加助手消息 → 写回磁盘。
 3. chat(..., hist[:-1], text)：API 要「过去历史」和「本轮用户句」分开传，hist[:-1] 去掉刚追加的那条 user。
+
+类型标注：见各文件统一的 `from __future__ import annotations` 说明。
 """
 
+# 让当前文件里可以用「list[str]」这种写法标注类型（Python 3.9+ 也可不用这行；写上兼容旧习惯）
 from __future__ import annotations
 
 from typing import Any
@@ -52,7 +55,9 @@ class ChatWidget(QWidget):
         row.addWidget(self._input)
         row.addWidget(send)
 
+        # QVBoxLayout(self)：把垂直布局挂到本控件上，由 Qt 管理子控件几何
         layout = QVBoxLayout(self)
+        # 骨架占位：标题只在构造时写入 version_id/task_id；set_task 换任务后不会自动改这行文字（若需要可在 set_task 里同步 QLabel）
         layout.addWidget(QLabel(f"AI 教练 · {version_id} / {task_id}"))
         layout.addWidget(self._history_view)
         layout.addLayout(row)
@@ -66,7 +71,12 @@ class ChatWidget(QWidget):
         self.load_history()
 
     def load_history(self) -> None:
-        """根据 version_id + task_id 从 JSON 读出 coach_history，刷新文本框。"""
+        """
+        根据 version_id + task_id 从 JSON 读出 coach_history，刷新文本框。
+
+        只读路径：不把数据写回磁盘。ensure_task_slot 会在传入的 data 字典上就地补键，
+        若随后没有 save_user_data，这些补键只存在于本次 load_history 里的局部变量 data 中。
+        """
         data = data_manager.load_user_data()
         slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)
         # or []：键不存在或值为 None 时当作空列表
@@ -107,8 +117,11 @@ class ChatWidget(QWidget):
         hist.append({"role": "user", "content": text})
 
         try:
-            # ai_coach.chat 期望：messages = 发送本轮之前的历史（不含本轮 user）
-            # 因此传 hist[:-1]：刚刚 append 的用户句单独作为 user_message 参数传入
+            # ai_coach.chat 期望：messages = 本轮发送「之前」的历史（不含本轮 user），
+            # 本轮用户句单独放在 user_message 参数里。
+            # 例：旧历史已有 2 条消息，append 用户后 hist 长度为 3，则 hist[:-1] 为前 2 条，与 API 约定一致。
+            # 注意：ai_coach.chat 内部已对网络/API 异常做了捕获并返回 "[API 错误] ..." 字符串，一般不会向外抛；
+            # 下面 except 主要防备极少数未预料异常（若走到 except，仍会写入一条 assistant 回复便于留痕）。
             reply = ai_coach.chat(
                 self._version_id,
                 self._task_id,
@@ -117,7 +130,7 @@ class ChatWidget(QWidget):
             )
         except Exception as exc:
             reply = f"[错误] {exc}"
-            # 弹出警告框，用户能看到异常信息
+            # 弹出警告框；多数 API 问题已在 ai_coach 内转成字符串，不一定走到这里
             QMessageBox.warning(self, "教练请求失败", str(exc))
 
         self.append_message("assistant", reply)

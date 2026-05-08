@@ -1,4 +1,12 @@
-"""AI 教练模式：聊天区 + 与 user_data 同步。"""
+"""
+AI 教练 Tab：只读历史区 + 输入框 + 发送；读写 user_data.json。
+
+初学者可以这样理解：
+1. QTextEdit 显示多轮对话；setReadOnly(True) 禁止用户直接改历史。
+2. 发送流程：读磁盘 → 追加用户消息 → 调 ai_coach.chat → 追加助手消息 → 写回磁盘。
+3. chat(..., hist[:-1], text)：API 要「过去历史」和「本轮用户句」分开传，hist[:-1] 去掉刚追加的那条 user。
+"""
+
 from __future__ import annotations
 
 from typing import Any
@@ -29,12 +37,15 @@ class ChatWidget(QWidget):
         self._version_id = version_id
         self._task_id = task_id
 
+        # 上方：对话记录（只读，防止误编辑）
         self._history_view = QTextEdit()
         self._history_view.setReadOnly(True)
+        # 单行输入框：适合一行提问；多行可日后换成 QTextEdit
         self._input = QLineEdit()
         self._input.setPlaceholderText("粘贴代码片段或描述你的问题…")
         send = QPushButton("发送")
         send.clicked.connect(self._on_send)
+        # 回车键也触发发送（和按钮同一槽函数）
         self._input.returnPressed.connect(self._on_send)
 
         row = QHBoxLayout()
@@ -46,20 +57,25 @@ class ChatWidget(QWidget):
         layout.addWidget(self._history_view)
         layout.addLayout(row)
 
+        # 启动时从磁盘恢复该任务的聊天记录到界面
         self.load_history()
 
     def set_task(self, task_id: str) -> None:
+        """左侧列表换了任务：更新内存里的 task_id（标题栏若要同步可在此扩展）。"""
         self._task_id = task_id
         self.load_history()
 
     def load_history(self) -> None:
+        """根据 version_id + task_id 从 JSON 读出 coach_history，刷新文本框。"""
         data = data_manager.load_user_data()
         slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)
+        # or []：键不存在或值为 None 时当作空列表
         hist = slot.get("coach_history") or []
         self._history_view.clear()
         for m in hist:
             role = m.get("role", "")
             content = m.get("content", "")
+            # append 在 QTextEdit 末尾追加一段（自动换行）
             self._history_view.append(f"[{role}]\n{content}\n")
 
     def clear(self) -> None:
@@ -71,9 +87,11 @@ class ChatWidget(QWidget):
         self._history_view.clear()
 
     def append_message(self, role: str, content: str) -> None:
+        """往界面追加一条消息（不负责写盘）。"""
         self._history_view.append(f"[{role}]\n{content}\n")
 
     def _on_send(self) -> None:
+        """点击发送或按回车：完成一轮对话并持久化。"""
         text = self._input.text().strip()
         if not text:
             return
@@ -81,12 +99,16 @@ class ChatWidget(QWidget):
 
         data = data_manager.load_user_data()
         slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)
+        # 复制一份历史列表，后面会在内存里追加两条再写回
         hist: list[dict[str, Any]] = list(slot.get("coach_history") or [])
 
+        # 先更新界面与内存中的用户消息
         self.append_message("user", text)
         hist.append({"role": "user", "content": text})
 
         try:
+            # ai_coach.chat 期望：messages = 发送本轮之前的历史（不含本轮 user）
+            # 因此传 hist[:-1]：刚刚 append 的用户句单独作为 user_message 参数传入
             reply = ai_coach.chat(
                 self._version_id,
                 self._task_id,
@@ -95,6 +117,7 @@ class ChatWidget(QWidget):
             )
         except Exception as exc:
             reply = f"[错误] {exc}"
+            # 弹出警告框，用户能看到异常信息
             QMessageBox.warning(self, "教练请求失败", str(exc))
 
         self.append_message("assistant", reply)

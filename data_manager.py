@@ -23,6 +23,9 @@ ROOT_DIR = Path(__file__).resolve().parent
 USER_DATA_PATH = ROOT_DIR / "data" / "user_data.json"
 SAMPLES_PATH = ROOT_DIR / "data" / "samples.json"
 
+# load_samples 缓存：(samples.json 的 st_mtime_ns, 解析结果)；文件变更后自动失效
+_SAMPLES_FILE_CACHE: tuple[int, dict[str, Any]] | None = None
+
 
 def load_user_data() -> dict[str, Any]:
     """
@@ -60,15 +63,29 @@ def save_user_data(data: dict[str, Any]) -> None:
 
 
 def load_samples() -> dict[str, Any]:
-    """读取预置样例库；文件不存在或损坏时返回空字典。"""
+    """
+    读取预置样例库；文件不存在或损坏时返回空字典。
+
+    同一进程内按文件的修改时间（纳秒 mtime）缓存解析结果，避免界面反复刷新时重复读盘与 json.loads；
+    保存或替换 samples.json 后 mtime 变化会重新读取。
+    """
+    global _SAMPLES_FILE_CACHE
     if not SAMPLES_PATH.is_file():
+        _SAMPLES_FILE_CACHE = None
         return {}
     try:
+        mtime_ns = SAMPLES_PATH.stat().st_mtime_ns
+        if _SAMPLES_FILE_CACHE is not None and _SAMPLES_FILE_CACHE[0] == mtime_ns:
+            return _SAMPLES_FILE_CACHE[1]
         text = SAMPLES_PATH.read_text(encoding="utf-8")
         if not text.strip():
-            return {}
-        return json.loads(text)
+            parsed: dict[str, Any] = {}
+        else:
+            parsed = json.loads(text)
+        _SAMPLES_FILE_CACHE = (mtime_ns, parsed)
+        return parsed
     except (json.JSONDecodeError, OSError):
+        _SAMPLES_FILE_CACHE = None
         return {}
 
 

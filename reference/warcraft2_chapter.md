@@ -1,4 +1,4 @@
-# 第 X+1 章　继承与多态：让每种武士各具特点
+# 第 2 章　继承与多态：让每种武士各具特点
 
 在上一章中，五种武士的降生消息格式完全相同，我们只用一个 `Warrior` 类就处理完了全部逻辑。这一章的题目在此基础上增加了新需求：dragon 有士气和武器，ninja 有两件武器，iceman 有一件武器，lion 有忠诚度，wolf 什么都没有——五种武士的**属性和打印格式各不相同**。
 
@@ -8,13 +8,13 @@
 
 > **注意：** 本章的代码在上一章的基础上修改。类名前缀从 `Warrior`/`Headquarter` 改为 `CWarrior`/`CHeadquarter`（C 代表 Class），这是很多 C++ 项目的命名惯例，有助于在代码中快速区分类名和变量名。
 
-## (X+1).1　规划新功能
+## 2.1　规划新功能
 
 与上一章相比，这次的改动集中在三处：
 
 第一，新增一个 `CWeapon` 类，用来描述武器的种类和攻击力。第二，把原来的 `Warrior` 类改造为**抽象基类** `CWarrior`，把公共的属性和降生消息的公共部分留在里面，再派生出 `CDragon`、`CNinja`、`CIceman`、`CLion`、`CWolf` 五个子类，每个子类各自处理自己独特的属性。第三，`CHeadquarter::Produce()` 里用 `switch` 语句，根据武士种类创建对应的子类对象。`CHeadquarter` 的整体结构基本不变，主函数几乎一字未动。
 
-## (X+1).2　新增武器类
+## 2.2　新增武器类
 
 下面来创建 `CWeapon` 类，把三种武器的名称和攻击力统一管理：
 
@@ -35,9 +35,9 @@ class CWeapon
 
 在①处，每件武器用两个整数描述：`nKindNo` 是种类编号（0=sword，1=bomb，2=arrow），`nForce` 是攻击力。`CWeapon` 的数据全部公开，这样各种武士子类在构造时可以直接为自己的武器赋值。在②处，名字表和攻击力表是静态成员，整个程序只存一份，所有武器实例共享。
 
-## (X+1).3　改造 CWarrior 基类
+## 2.3　改造 CWarrior 基类
 
-### (X+1).3.1　声明与虚函数
+### 2.3.1　声明与虚函数
 
 下面来重新声明 `CWarrior` 类。这次它是一个**基类**，和上一章相比有几处关键变化：
 
@@ -74,7 +74,7 @@ class CWarrior
 
 > **注意：** "只要基类中有虚函数，析构函数就应该声明为虚的"——这条规则记住了，以后用多态时就不会踩坑。
 
-### (X+1).3.2　基类的 PrintResult
+### 2.3.2　基类的 PrintResult
 
 下面来实现 `CWarrior` 的公共打印函数：
 
@@ -99,9 +99,9 @@ void CWarrior::PrintResult(int nTime, int nKindNo)
 
 在①处，`GetColor()` 的签名和上一章不同：这次它接受一个 `char*` 参数，把结果写进去，而不是返回 `string`。每个子类的 `PrintResult(int nTime)` 会先调用这个基类版本打印公共部分，再自己打印额外信息。
 
-## (X+1).4　为每种武士创建子类
+## 2.4　为每种武士创建子类
 
-### (X+1).4.1　CDragon：士气与武器
+### 2.4.1　CDragon：士气与武器
 
 ```cpp
 // warcraft2.cpp
@@ -136,7 +136,7 @@ class CDragon : public CWarrior   // ①
 
 在⑤处，先调用 `CWarrior::PrintResult(nTime, DRAGON)` 打印公共的降生消息，再打印 dragon 特有的武器和士气信息。这种"先调用基类版本，再追加子类内容"的写法是 C++ 重写虚函数时的常见模式。
 
-### (X+1).4.2　CNinja：双持武器
+### 2.4.2　CNinja：双持武器
 
 ```cpp
 // warcraft2.cpp
@@ -165,7 +165,7 @@ class CNinja : public CWarrior
 
 在①处，ninja 持有一个长度为 2 的武器数组，结构上和 dragon 只差一件武器。在②处，两件武器的编号分别是 `nNo % 3` 和 `(nNo + 1) % 3`，保证编号相邻但取模后不同。
 
-### (X+1).4.3　CIceman、CLion 与 CWolf
+### 2.4.3　CIceman、CLion 与 CWolf
 
 iceman 和 dragon 的结构几乎相同，只有一件武器，没有士气：
 
@@ -231,7 +231,7 @@ class CWolf : public CWarrior
 };
 ```
 
-## (X+1).5　改造 Produce()：用 switch 创建子类对象
+## 2.5　改造 Produce()：用 switch 创建子类对象
 
 `Produce()` 的整体逻辑和上一章完全相同——跳过造不起的武士、扣减生命元、打印停产消息。唯一的变化是创建武士对象的那一步，从一行 `new Warrior(...)` 变成了一段 `switch`：
 
@@ -272,7 +272,7 @@ int CHeadquarter::Produce(int nTime)
 
 在②处，调用 `pWarriors[nTotalWarriorNum]->PrintResult(nTime)`。因为 `PrintResult(int nTime)` 是虚函数，C++ 会在运行时根据指针实际指向的对象类型，自动调用正确的子类版本——`CDragon` 的就调用 `CDragon::PrintResult`，`CLion` 的就调用 `CLion::PrintResult`。`Produce()` 完全不需要知道当前武士是什么类型，这就是多态带来的简洁。
 
-## (X+1).6　GetColor() 和静态成员
+## 2.6　GetColor() 和静态成员
 
 `GetColor()` 的实现改为写入外部字符数组：
 
@@ -301,7 +301,7 @@ int         CHeadquarter::MakingSeq[2][WARRIOR_NUM] = { {2,3,4,1,0}, {3,0,1,2,4}
 
 与上一章相比，这里多了 `CWeapon` 的两个静态成员定义。`InitialForce` 本题暂时不读入，是为后续扩展预留的接口。
 
-## (X+1).7　主函数几乎不变
+## 2.7　主函数几乎不变
 
 主函数的结构和上一章完全一样，改动只有类名前缀：
 
@@ -365,279 +365,4 @@ It has a sword and a bomb
 003 blue iceman 4 born with strength 5,1 iceman in blue headquarter
 It has a bomb
 004 blue headquarter stops making warriors
-```
-
----
-
-## 完整代码
-
-```cpp
-#include <iostream>
-#include <cstdio>
-#include <cstring>
-#include <string>
-using namespace std;
-
-#define WARRIOR_NUM 5
-#define WEAPON_NUM  3
-#define MAX_WARRIORS 1000
-
-enum { DRAGON, NINJA, ICEMAN, LION, WOLF };
-
-class CHeadquarter;
-
-class CWeapon
-{
-    public:
-        int nKindNo;
-        int nForce;
-        static int         InitialForce[WEAPON_NUM];
-        static const char* Names[WEAPON_NUM];
-};
-
-class CWarrior
-{
-    protected:
-        CHeadquarter* pHeadquarter;
-        int nNo;
-    public:
-        static const char* Names[WARRIOR_NUM];
-        static int         InitialLifeValue[WARRIOR_NUM];
-        CWarrior(CHeadquarter* p, int nNo_);
-        virtual void PrintResult(int nTime, int nKindNo);
-        virtual void PrintResult(int nTime) = 0;
-        virtual ~CWarrior() { }
-};
-
-class CHeadquarter
-{
-    private:
-        int  nTotalLifeValue;
-        bool bStopped;
-        int  nColor;
-        int  nCurMakingSeqIdx;
-        int  anWarriorNum[WARRIOR_NUM];
-        int  nTotalWarriorNum;
-        CWarrior* pWarriors[MAX_WARRIORS];
-    public:
-        friend class CWarrior;
-        static int MakingSeq[2][WARRIOR_NUM];
-        void Init(int nColor_, int lv);
-        ~CHeadquarter();
-        int  Produce(int nTime);
-        void GetColor(char* szColor);
-        int  GetTotalLifeValue() { return nTotalLifeValue; }
-};
-
-class CDragon : public CWarrior
-{
-    private:
-        CWeapon wp;
-        double  fmorale;
-    public:
-        CDragon(CHeadquarter* p, int nNo_) : CWarrior(p, nNo_)
-        {
-            wp.nKindNo = nNo % WEAPON_NUM;
-            wp.nForce  = CWeapon::InitialForce[wp.nKindNo];
-            fmorale    = pHeadquarter->GetTotalLifeValue()
-                         / (double)CWarrior::InitialLifeValue[DRAGON];
-        }
-        void PrintResult(int nTime)
-        {
-            CWarrior::PrintResult(nTime, DRAGON);
-            printf("It has a %s,and it's morale is %.2f\n",
-                   CWeapon::Names[wp.nKindNo], fmorale);
-        }
-};
-
-class CNinja : public CWarrior
-{
-    private:
-        CWeapon wps[2];
-    public:
-        CNinja(CHeadquarter* p, int nNo_) : CWarrior(p, nNo_)
-        {
-            wps[0].nKindNo = nNo % WEAPON_NUM;
-            wps[0].nForce  = CWeapon::InitialForce[wps[0].nKindNo];
-            wps[1].nKindNo = (nNo + 1) % WEAPON_NUM;
-            wps[1].nForce  = CWeapon::InitialForce[wps[1].nKindNo];
-        }
-        void PrintResult(int nTime)
-        {
-            CWarrior::PrintResult(nTime, NINJA);
-            printf("It has a %s and a %s\n",
-                   CWeapon::Names[wps[0].nKindNo],
-                   CWeapon::Names[wps[1].nKindNo]);
-        }
-};
-
-class CIceman : public CWarrior
-{
-    private:
-        CWeapon wp;
-    public:
-        CIceman(CHeadquarter* p, int nNo_) : CWarrior(p, nNo_)
-        {
-            wp.nKindNo = nNo % WEAPON_NUM;
-            wp.nForce  = CWeapon::InitialForce[wp.nKindNo];
-        }
-        void PrintResult(int nTime)
-        {
-            CWarrior::PrintResult(nTime, ICEMAN);
-            printf("It has a %s\n", CWeapon::Names[wp.nKindNo]);
-        }
-};
-
-class CLion : public CWarrior
-{
-    private:
-        int nLoyalty;
-    public:
-        CLion(CHeadquarter* p, int nNo_) : CWarrior(p, nNo_)
-        {
-            nLoyalty = pHeadquarter->GetTotalLifeValue();
-        }
-        void PrintResult(int nTime)
-        {
-            CWarrior::PrintResult(nTime, LION);
-            nLoyalty = pHeadquarter->GetTotalLifeValue();
-            printf("It's loyalty is %d\n", nLoyalty);
-        }
-};
-
-class CWolf : public CWarrior
-{
-    public:
-        CWolf(CHeadquarter* p, int nNo_) : CWarrior(p, nNo_) { }
-        void PrintResult(int nTime)
-        {
-            CWarrior::PrintResult(nTime, WOLF);
-        }
-};
-
-CWarrior::CWarrior(CHeadquarter* p, int nNo_)
-{
-    nNo          = nNo_;
-    pHeadquarter = p;
-}
-
-void CWarrior::PrintResult(int nTime, int nKindNo)
-{
-    char szColor[20];
-    pHeadquarter->GetColor(szColor);
-    printf("%03d %s %s %d born with strength %d,%d %s in %s headquarter\n",
-           nTime, szColor, Names[nKindNo], nNo, InitialLifeValue[nKindNo],
-           pHeadquarter->anWarriorNum[nKindNo], Names[nKindNo], szColor);
-}
-
-void CHeadquarter::Init(int nColor_, int lv)
-{
-    nColor           = nColor_;
-    nTotalLifeValue  = lv;
-    bStopped         = false;
-    nCurMakingSeqIdx = 0;
-    nTotalWarriorNum = 0;
-    for (int i = 0; i < WARRIOR_NUM; i++)
-        anWarriorNum[i] = 0;
-}
-
-CHeadquarter::~CHeadquarter()
-{
-    for (int i = 0; i < nTotalWarriorNum; i++)
-        delete pWarriors[i];
-}
-
-int CHeadquarter::Produce(int nTime)
-{
-    if (bStopped)
-        return 0;
-
-    int nSearchingTimes = 0;
-    while (CWarrior::InitialLifeValue[MakingSeq[nColor][nCurMakingSeqIdx]]
-               > nTotalLifeValue
-           && nSearchingTimes < WARRIOR_NUM)
-    {
-        nCurMakingSeqIdx = (nCurMakingSeqIdx + 1) % WARRIOR_NUM;
-        nSearchingTimes++;
-    }
-
-    int nKindNo = MakingSeq[nColor][nCurMakingSeqIdx];
-
-    if (CWarrior::InitialLifeValue[nKindNo] > nTotalLifeValue)
-    {
-        bStopped = true;
-        if (nColor == 0)
-            printf("%03d red headquarter stops making warriors\n",  nTime);
-        else
-            printf("%03d blue headquarter stops making warriors\n", nTime);
-        return 0;
-    }
-
-    nTotalLifeValue -= CWarrior::InitialLifeValue[nKindNo];
-    nCurMakingSeqIdx = (nCurMakingSeqIdx + 1) % WARRIOR_NUM;
-    anWarriorNum[nKindNo]++;
-
-    switch (nKindNo)
-    {
-        case DRAGON:
-            pWarriors[nTotalWarriorNum] = new CDragon(this, nTotalWarriorNum+1);
-            break;
-        case NINJA:
-            pWarriors[nTotalWarriorNum] = new CNinja(this, nTotalWarriorNum+1);
-            break;
-        case ICEMAN:
-            pWarriors[nTotalWarriorNum] = new CIceman(this, nTotalWarriorNum+1);
-            break;
-        case LION:
-            pWarriors[nTotalWarriorNum] = new CLion(this, nTotalWarriorNum+1);
-            break;
-        case WOLF:
-            pWarriors[nTotalWarriorNum] = new CWolf(this, nTotalWarriorNum+1);
-            break;
-    }
-
-    pWarriors[nTotalWarriorNum]->PrintResult(nTime);
-    nTotalWarriorNum++;
-    return 1;
-}
-
-void CHeadquarter::GetColor(char* szColor)
-{
-    if (nColor == 0) strcpy(szColor, "red");
-    else             strcpy(szColor, "blue");
-}
-
-const char* CWeapon::Names[WEAPON_NUM]     = {"sword", "bomb", "arrow"};
-int         CWeapon::InitialForce[WEAPON_NUM];
-
-const char* CWarrior::Names[WARRIOR_NUM]   = {"dragon","ninja","iceman","lion","wolf"};
-int         CWarrior::InitialLifeValue[WARRIOR_NUM];
-int         CHeadquarter::MakingSeq[2][WARRIOR_NUM] = { {2,3,4,1,0}, {3,0,1,2,4} };
-
-int main()
-{
-    int t, m;
-    CHeadquarter RedHead, BlueHead;
-    scanf("%d", &t);
-    int nCaseNo = 1;
-    while (t--)
-    {
-        printf("Case:%d\n", nCaseNo++);
-        scanf("%d", &m);
-        for (int i = 0; i < WARRIOR_NUM; i++)
-            scanf("%d", &CWarrior::InitialLifeValue[i]);
-        RedHead.Init(0, m);
-        BlueHead.Init(1, m);
-        int nTime = 0;
-        while (true)
-        {
-            int tmp1 = RedHead.Produce(nTime);
-            int tmp2 = BlueHead.Produce(nTime);
-            if (tmp1 == 0 && tmp2 == 0)
-                break;
-            nTime++;
-        }
-    }
-    return 0;
-}
 ```

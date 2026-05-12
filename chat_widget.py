@@ -28,6 +28,7 @@ import data_manager
 import sections_loader
 
 _PLANNING_BOOTSTRAP_TRIGGER = "请开始本节导读讲解。"
+_CODING_BOOTSTRAP_TRIGGER = "请开始本节的学习引导讲解。"
 _EMPTY_ASSISTANT_FALLBACK = "[模型未返回正文，请重试或更换模型。]"
 
 
@@ -47,8 +48,19 @@ def _is_planning_placeholder_bootstrap(hist: list[dict[str, Any]]) -> bool:
     return str(a0.get("content", "")).startswith("[占位回复]")
 
 
-class PlanningBootstrapThread(QThread):
-    """在后台线程调用 ai_coach.chat，避免阻塞 UI 主线程。"""
+def _is_coding_placeholder_bootstrap(hist: list[dict[str, Any]]) -> bool:
+    if len(hist) != 2:
+        return False
+    u0, a0 = hist[0], hist[1]
+    if u0.get("role") != "user" or a0.get("role") != "assistant":
+        return False
+    if u0.get("content") != _CODING_BOOTSTRAP_TRIGGER:
+        return False
+    return str(a0.get("content", "")).startswith("[占位回复]")
+
+
+class IntroBootstrapThread(QThread):
+    """空历史自动引导：后台调用 ai_coach.chat，避免阻塞 UI。"""
 
     finished_ok = pyqtSignal(str, str, str, str)
     finished_err = pyqtSignal(str, str, str, str)
@@ -64,6 +76,10 @@ class PlanningBootstrapThread(QThread):
         self._version_id = version_id
         self._task_id = task_id
         self._trigger = trigger
+
+    @property
+    def bootstrap_task_id(self) -> str:
+        return self._task_id
 
     def run(self) -> None:
         try:
@@ -101,6 +117,10 @@ class CoachChatThread(QThread):
         self._task_id = task_id
         self._messages = copy.deepcopy(messages)
         self._user_message = user_message
+
+    @property
+    def thread_task_id(self) -> str:
+        return self._task_id
 
     def run(self) -> None:
         try:
@@ -155,7 +175,7 @@ class ChatWidget(QWidget):
       - 左侧列表切换任务时调用 set_task(new_id)，内部会更新 self._task_id 并重新 load_history。
 
     线程说明：
-      规划导读与（有 API Key 时）普通发送在后台 QThread 中调用网络；无 Key 时占位回复仍同步、立即返回。
+      规划/编码小节在空历史时自动引导；普通发送在后台 QThread 中调用网络；无 Key 时占位仍同步。
     """
 
     def __init__(
@@ -171,7 +191,7 @@ class ChatWidget(QWidget):
         self._program_loader = program_loader or (
             lambda: data_manager.load_version_code(version_id)
         )
-        self._planning_bootstrap_thread: PlanningBootstrapThread | None = None
+        self._intro_bootstrap_thread: IntroBootstrapThread | None = None
         self._chat_send_thread: CoachChatThread | None = None
 
         # ---------- 上方：对话记录 ----------
@@ -227,38 +247,59 @@ class ChatWidget(QWidget):
     def _bootstrap_if_needed(self) -> None:
         if self._is_debug_task():
             self._bootstrap_debug_if_needed()
-        else:
-            self._bootstrap_planning_if_needed()
+            return
+        self._bootstrap_planning_if_needed()
+        self._bootstrap_coding_if_needed()
 
     def _update_ctx_label(self) -> None:
         sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
         title = sec.get("title") if sec else None
         suffix = f" · {title}" if title else ""
         base = f"AI 教练 · {self._version_id} / {self._task_id}{suffix}"
-        if self._chat_send_thread_busy():
+        chat_th = self._chat_send_thread
+        chat_here = (
+            chat_th
+            and chat_th.isRunning()
+            and chat_th.thread_task_id == self._task_id
+        )
+        intro_th = self._intro_bootstrap_thread
+        intro_here = (
+            intro_th
+            and intro_th.isRunning()
+            and intro_th.bootstrap_task_id == self._task_id
+        )
+        if chat_here:
             base += " · 正在请求回复…"
-        elif self._planning_thread_busy() and sec and sec.get("role") == "planning":
-            base += " · 正在获取导读…"
+        elif intro_here:
+            if sec and sec.get("role") == "planning":
+                base += " · 正在获取导读…"
+            else:
+                base += " · 正在生成本节引导…"
         self._ctx_label.setText(base)
 
-    def _planning_thread_busy(self) -> bool:
+    def _intro_thread_running(self) -> bool:
         return bool(
-            self._planning_bootstrap_thread
-            and self._planning_bootstrap_thread.isRunning()
+            self._intro_bootstrap_thread and self._intro_bootstrap_thread.isRunning()
         )
 
-    def _chat_send_thread_busy(self) -> bool:
+    def _chat_send_thread_busy_for_current(self) -> bool:
+        th = self._chat_send_thread
+        return bool(th and th.isRunning() and th.thread_task_id == self._task_id)
+
+    def _chat_send_thread_running(self) -> bool:
         return bool(self._chat_send_thread and self._chat_send_thread.isRunning())
 
-    def _may_overwrite_with_planning_bootstrap(self) -> bool:
-        """仅当磁盘上仍为空或仍为「无 Key 占位导读」时才允许写入自动导读。"""
+    def _may_overwrite_auto_intro(self) -> bool:
+        """空磁盘或仍为「无 Key 占位」双条（导读或编码引导）时才允许覆盖。"""
         cur = data_manager.load_task_history(self._version_id, self._task_id)
         if not cur:
             return True
-        return _is_planning_placeholder_bootstrap(cur)
+        return _is_planning_placeholder_bootstrap(cur) or _is_coding_placeholder_bootstrap(
+            cur
+        )
 
-    def _save_planning_bootstrap_messages(self, trigger: str, reply: str) -> None:
-        if not self._may_overwrite_with_planning_bootstrap():
+    def _save_auto_intro_messages(self, trigger: str, reply: str) -> None:
+        if not self._may_overwrite_auto_intro():
             return
         data_manager.save_task_history(
             self._version_id,
@@ -270,29 +311,30 @@ class ChatWidget(QWidget):
         )
         self.load_history()
 
-    def _start_planning_bootstrap_async(self, trigger: str) -> None:
-        if self._planning_thread_busy():
+    def _start_intro_bootstrap_async(self, trigger: str) -> None:
+        if self._intro_thread_running():
             return
-        th = PlanningBootstrapThread(
+        th = IntroBootstrapThread(
             self._version_id, self._task_id, trigger, self
         )
-        th.finished_ok.connect(self._on_planning_bootstrap_finished_ok)
-        th.finished_err.connect(self._on_planning_bootstrap_finished_err)
-        th.finished.connect(lambda t=th: self._on_planning_bootstrap_thread_finished(t))
-        self._planning_bootstrap_thread = th
+        th.finished_ok.connect(self._on_intro_bootstrap_finished_ok)
+        th.finished_err.connect(self._on_intro_bootstrap_finished_err)
+        th.finished.connect(lambda t=th: self._on_intro_bootstrap_thread_finished(t))
+        self._intro_bootstrap_thread = th
         th.start()
         self._update_ctx_label()
 
-    def _on_planning_bootstrap_thread_finished(self, th: QThread) -> None:
-        if self._planning_bootstrap_thread is th:
-            self._planning_bootstrap_thread = None
+    def _on_intro_bootstrap_thread_finished(self, th: QThread) -> None:
+        if self._intro_bootstrap_thread is th:
+            self._intro_bootstrap_thread = None
         th.deleteLater()
         self._update_ctx_label()
+        QTimer.singleShot(0, self._bootstrap_if_needed)
 
     def _start_coach_chat_async(
         self, messages: list[dict[str, Any]], user_text: str
     ) -> None:
-        if self._chat_send_thread_busy():
+        if self._chat_send_thread_running():
             return
         th = CoachChatThread(
             self._version_id, self._task_id, messages, user_text, self
@@ -373,49 +415,59 @@ class ChatWidget(QWidget):
         data_manager.save_task_history(self._version_id, self._task_id, hist)
         self.load_history()
 
-    def _on_planning_bootstrap_finished_ok(
+    def _on_intro_bootstrap_finished_ok(
         self, vid: str, tid: str, trigger: str, reply: str
     ) -> None:
         if vid != self._version_id or tid != self._task_id:
-            QMessageBox.information(
-                self,
-                "导读未写入",
-                "您已切换到其他版本或任务，自动导读结果已丢弃。",
-            )
             return
-        self._save_planning_bootstrap_messages(
+        self._save_auto_intro_messages(
             trigger, _normalize_assistant_reply(reply)
         )
 
-    def _on_planning_bootstrap_finished_err(
+    def _on_intro_bootstrap_finished_err(
         self, vid: str, tid: str, trigger: str, err: str
     ) -> None:
         if vid != self._version_id or tid != self._task_id:
-            QMessageBox.information(
-                self,
-                "导读未写入",
-                "您已切换到其他版本或任务，导读错误信息已丢弃。",
-            )
             return
-        self._save_planning_bootstrap_messages(trigger, f"[错误] {err}")
+        self._save_auto_intro_messages(trigger, f"[错误] {err}")
 
     def _bootstrap_planning_if_needed(self) -> None:
         sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
         if not sec or sec.get("role") != "planning":
             return
-        if self._planning_thread_busy():
+        if self._intro_thread_running():
             return
         hist = data_manager.load_task_history(self._version_id, self._task_id)
         trigger = _PLANNING_BOOTSTRAP_TRIGGER
         if hist:
             if _is_planning_placeholder_bootstrap(hist) and ai_coach.has_api_key():
-                self._start_planning_bootstrap_async(trigger)
+                self._start_intro_bootstrap_async(trigger)
             return
         if ai_coach.has_api_key():
-            self._start_planning_bootstrap_async(trigger)
+            self._start_intro_bootstrap_async(trigger)
         else:
             reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
-            self._save_planning_bootstrap_messages(
+            self._save_auto_intro_messages(
+                trigger, _normalize_assistant_reply(reply)
+            )
+
+    def _bootstrap_coding_if_needed(self) -> None:
+        sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
+        if not sec or sec.get("role") in ("planning", "debug"):
+            return
+        if self._intro_thread_running():
+            return
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        trigger = _CODING_BOOTSTRAP_TRIGGER
+        if hist:
+            if _is_coding_placeholder_bootstrap(hist) and ai_coach.has_api_key():
+                self._start_intro_bootstrap_async(trigger)
+            return
+        if ai_coach.has_api_key():
+            self._start_intro_bootstrap_async(trigger)
+        else:
+            reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
+            self._save_auto_intro_messages(
                 trigger, _normalize_assistant_reply(reply)
             )
 
@@ -604,7 +656,7 @@ class ChatWidget(QWidget):
         text = self._input.toPlainText().strip()
         if not text:
             return
-        if self._chat_send_thread_busy():
+        if self._chat_send_thread_busy_for_current():
             QMessageBox.information(
                 self,
                 "请稍候",

@@ -25,6 +25,12 @@ SAMPLES_PATH = ROOT_DIR / "data" / "samples.json"
 
 # load_samples 缓存：(samples.json 的 st_mtime_ns, 解析结果)；文件变更后自动失效
 _SAMPLES_FILE_CACHE: tuple[int, dict[str, Any]] | None = None
+# load_version_samples 缓存：version_id -> (mtime_ns, 解析结果)
+_VERSION_SAMPLES_CACHE: dict[str, tuple[int, list[dict[str, Any]]]] = {}
+
+
+def version_samples_path(version_id: str) -> Path:
+    return ROOT_DIR / "data" / version_id / "samples.json"
 
 
 def load_user_data() -> dict[str, Any]:
@@ -90,6 +96,34 @@ def load_samples() -> dict[str, Any]:
     except (json.JSONDecodeError, OSError):  # JSONDecodeError：语法错；OSError：权限、磁盘等读失败
         _SAMPLES_FILE_CACHE = None  # 解析失败不把半成品放进缓存，以免一直返回坏状态
         return {}  # 静默降级为空 dict（与文件不存在时一致），界面表现为「暂无样例配置」
+
+
+def load_version_samples(version_id: str) -> list[dict[str, Any]]:
+    """Read data/versionN/samples.json as a flat sample array; cache by mtime."""
+    global _VERSION_SAMPLES_CACHE
+    path = version_samples_path(version_id)
+    if not path.is_file():
+        _VERSION_SAMPLES_CACHE.pop(version_id, None)
+        return []
+    try:
+        mtime_ns = path.stat().st_mtime_ns
+        cached = _VERSION_SAMPLES_CACHE.get(version_id)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+        text = path.read_text(encoding="utf-8")
+        if not text.strip():
+            parsed: list[dict[str, Any]] = []
+        else:
+            raw = json.loads(text)
+            if not isinstance(raw, list):
+                parsed = []
+            else:
+                parsed = [x for x in raw if isinstance(x, dict)]
+        _VERSION_SAMPLES_CACHE[version_id] = (mtime_ns, parsed)
+        return parsed
+    except (json.JSONDecodeError, OSError):
+        _VERSION_SAMPLES_CACHE.pop(version_id, None)
+        return []
 
 
 def ensure_task_slot(data: dict[str, Any], version_id: str, task_id: str) -> dict[str, Any]:

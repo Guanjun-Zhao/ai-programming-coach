@@ -18,6 +18,8 @@ from pathlib import Path
 # 历史消息列表里每条是 dict，用 Any 兼容额外字段
 from typing import Any
 
+import sections_loader
+
 # 本文件所在目录，作为项目根下的相对路径锚点
 ROOT_DIR = Path(__file__).resolve().parent
 # 存放各版本系统提示词文本的目录（如 prompts/version1.txt）
@@ -45,6 +47,43 @@ def get_system_prompt(version_id: str) -> str:
     )
 
 
+def _looks_like_code_snippet(text: str) -> bool:
+    """Heuristic: multi-line snippet that looks like C/C++ source."""
+    t = text.strip()
+    if len(t) < 40:
+        return False
+    if "\n" not in t:
+        return False
+    return ";" in t or "{" in t or "#include" in t
+
+
+def build_task_system(version_id: str, task_id: str) -> str:
+    """Base coach prompt + current leaf section description from sections.json."""
+    base = get_system_prompt(version_id)
+    sec = sections_loader.get_leaf_section(version_id, task_id)
+    if not sec:
+        return base
+    title = str(sec.get("title", task_id))
+    desc = str(sec.get("description", ""))
+    role = sec.get("role")
+    if role == "planning":
+        return (
+            base
+            + f"\n\n【当前任务：{title}（导读/功能设计）】\n{desc}\n\n"
+            + "教学要求：只讲解题意与模块分工，不要输出代码块，不要要求用户在本节粘贴代码验证；"
+            + "结尾用一两句自然口语建议用户点击左侧下一节开始具体编码。"
+        )
+    if role == "debug":
+        return base
+    sid = str(sec.get("section_id", ""))
+    return (
+        base
+        + f"\n\n【当前编码小节：{title}（{sid}）】\n{desc}\n\n"
+        + "教学要求：用中文描述要实现什么、逻辑如何流动；不要输出代码块；"
+        + "用户若索要完整代码，引导其自己动手完成。"
+    )
+
+
 def chat(
     version_id: str,
     task_id: str,
@@ -56,13 +95,18 @@ def chat(
     messages：此前多轮历史，每项为 {"role":"user"|"assistant","content": str}。
     未配置 DEEPSEEK_API_KEY 时返回占位字符串，便于无密钥联调界面。
 
-    task_id：界面侧当前左侧任务，用于占位回复里标注上下文；将来若做「按任务的 Prompt」也会用到。
-    当前发往模型的 payload 只由 version_id 决定 System Prompt，不把 task_id 单独塞进 API。
+    task_id：当前叶子任务 id；与 `sections.json` 组合为 `build_task_system` 注入本节说明。
     """
+    sec = sections_loader.get_leaf_section(version_id, task_id)
+    if sec and sec.get("skip_code_verify") and _looks_like_code_snippet(user_message):
+        return (
+            "【提示】当前小节不需要在这里粘贴大段代码做验证（导读或未开放本节验证）。"
+            "请切换到左侧具体编码小节后再粘贴代码，或继续用文字提问。"
+        )
+
     # 从环境变量读取密钥，缺省为空串；strip 去掉无意中的空格换行
     api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
-    # 根据版本 id 加载对应系统提示词全文
-    system = get_system_prompt(version_id)
+    system = build_task_system(version_id, task_id)
 
     # 发给模型的消息列表：先放一条 system，角色与内容均为字符串（API 要求）
     payload_messages: list[dict[str, str]] = [{"role": "system", "content": system}]

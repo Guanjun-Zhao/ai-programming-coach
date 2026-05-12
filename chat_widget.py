@@ -22,6 +22,7 @@ from PyQt6.QtWidgets import (  # 本文件用到的界面类
 
 import ai_coach  # 调用大模型/占位回复
 import data_manager  # 读写 user_data.json
+import sections_loader  # 当前叶子标题与导读引导
 
 
 class ComposerTextEdit(QTextEdit):
@@ -98,11 +99,39 @@ class ChatWidget(QWidget):
         row.addWidget(actions_col, stretch=0, alignment=Qt.AlignmentFlag.AlignTop)  # 右侧列不拉伸、顶对齐
 
         layout = QVBoxLayout(self)  # 本控件根布局
-        layout.addWidget(QLabel(f"AI 教练 · {version_id} / {task_id}"))  # 标题行
+        self._ctx_label = QLabel("")  # 版本 / 任务 / 小节标题
+        layout.addWidget(self._ctx_label)  # 标题行
         layout.addWidget(self._history_view)  # 中间：历史
         layout.addLayout(row)  # 底：输入行
 
+        self._update_ctx_label()
         self.load_history()  # 进入时从磁盘恢复本任务历史
+        self._bootstrap_planning_if_needed()  # 功能设计：空历史自动一轮导读
+
+    def _update_ctx_label(self) -> None:
+        sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
+        title = sec.get("title") if sec else None
+        suffix = f" · {title}" if title else ""
+        self._ctx_label.setText(f"AI 教练 · {self._version_id} / {self._task_id}{suffix}")
+
+    def _bootstrap_planning_if_needed(self) -> None:
+        """Planning leaf with empty history: one assistant turn (and trigger user line for API)."""
+        sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
+        if not sec or sec.get("role") != "planning":
+            return
+        data = data_manager.load_user_data()
+        slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)
+        hist: list[dict[str, Any]] = list(slot.get("coach_history") or [])
+        if hist:
+            return
+        trigger = "请开始本节导读讲解。"
+        reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
+        slot["coach_history"] = [
+            {"role": "user", "content": trigger},
+            {"role": "assistant", "content": reply},
+        ]
+        data_manager.save_user_data(data)
+        self.load_history()
 
     def set_task(self, task_id: str) -> None:
         """
@@ -110,7 +139,9 @@ class ChatWidget(QWidget):
         更新内存中的 task_id 后立刻 load_history，使右侧文本与磁盘里该任务的记录一致。
         """
         self._task_id = task_id  # 更新当前任务
+        self._update_ctx_label()
         self.load_history()  # 重载该任务的 coach_history 到界面
+        self._bootstrap_planning_if_needed()
 
     def load_history(self) -> None:
         """

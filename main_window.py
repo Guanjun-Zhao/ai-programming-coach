@@ -40,8 +40,11 @@ from PyQt6.QtWidgets import (
     QWidget,  # 通用矩形控件基类；可作为一页的「根容器」
 )
 
-# 同项目：某一魔兽版本的完整页面（左任务列表 + 右 Tab）
+# 同项目：某一魔兽版本的完整页面（左任务树 + 右 Tab）
 from version_page import VersionPage
+
+import data_manager
+import sections_loader
 
 # 主页四个按钮的数据源：每项 (内部 id, 按钮上显示的中文)。
 # 内部 id 必须稳定（字符串），供 OpenAI/DeepSeek、路径 prompts、JSON 使用；中文 label 仅展示。
@@ -79,6 +82,8 @@ class MainWindow(QMainWindow):
         home_layout.addWidget(QLabel("选择题目版本"))  # 顶部提示文字；QLabel 默认不接收点击
         row = QHBoxLayout()  # 下一行将容纳四个并排按钮；此时还未 attach 到 home
 
+        self._home_version_buttons: list[tuple[str, QPushButton]] = []
+
         for vid, label in VERSION_ENTRIES:
             btn = QPushButton(label)  # 按钮文字为用户可读标题；vid 保存在闭包里
 
@@ -92,6 +97,9 @@ class MainWindow(QMainWindow):
             btn.clicked.connect(lambda checked, v=vid: self._open_version(v))
 
             row.addWidget(btn)  # 从左到右依次放入四个按钮
+            self._home_version_buttons.append((vid, btn))
+
+        self._refresh_home_progress_labels()
 
         # 把横向布局整体作为「第二行」塞进竖向布局（第一行是 QLabel）
         home_layout.addLayout(row)
@@ -106,6 +114,15 @@ class MainWindow(QMainWindow):
 
         # 把整个栈交给主窗口中央区域；此后可见内容完全由 _stack 当前页决定
         self.setCentralWidget(self._stack)
+
+    def _refresh_home_progress_labels(self) -> None:
+        """主页按钮展示「已勾选 / 左侧全部复选框」计数（见 sections_loader）。"""
+        data = data_manager.load_user_data()
+        for vid, btn in self._home_version_buttons:
+            label = next(l for v, l in VERSION_ENTRIES if v == vid)
+            den = sections_loader.progress_denominator(vid)
+            num = sections_loader.progress_numerator(data, vid)
+            btn.setText(f"{label}  [{num}/{den}]")
 
     def _open_version(self, version_id: str) -> None:
         """响应主页按钮：切换到对应版本的 VersionPage（必要时先创建）。"""
@@ -129,3 +146,4 @@ class MainWindow(QMainWindow):
         若将来调整 addWidget 顺序，必须同步修改这里的索引或改用按对象切换。
         """
         self._stack.setCurrentIndex(0)
+        self._refresh_home_progress_labels()

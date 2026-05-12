@@ -15,6 +15,7 @@ PROMPTS_DIR = ROOT_DIR / "prompts"
 
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-flash"
+API_PING_TIMEOUT_SECONDS = 45.0
 
 _runtime_api_key: str | None = None
 _runtime_model: str | None = None
@@ -22,12 +23,44 @@ _runtime_model: str | None = None
 
 def set_runtime_config(api_key: str, model: str) -> None:
     global _runtime_api_key, _runtime_model
-    _runtime_api_key = api_key.strip()
+    stripped = api_key.strip()
+    _runtime_api_key = stripped if stripped else None
     _runtime_model = model.strip() or None
 
 
 def get_runtime_model() -> str:
     return _model()
+
+
+def has_api_key() -> bool:
+    return bool(_api_key())
+
+
+def ping_api(max_wait_seconds: float = API_PING_TIMEOUT_SECONDS) -> str | None:
+    """
+    轻量请求 DeepSeek OpenAI 兼容接口，用于保存/启动时连通性检测。
+    成功返回 None；失败返回可读错误字符串（含超时、401 等）。
+    """
+    api_key = _api_key()
+    if not api_key:
+        return "未配置 API Key（请填写或使用环境变量 DEEPSEEK_API_KEY）。"
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(
+            api_key=api_key,
+            base_url=DEEPSEEK_BASE_URL,
+            timeout=max_wait_seconds,
+        )
+        completion = client.chat.completions.create(
+            model=_model(),
+            messages=[{"role": "user", "content": "ping"}],
+            max_tokens=1,
+        )
+        _ = completion.choices[0].message
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
 
 
 def get_system_prompt(version_id: str) -> str:
@@ -115,7 +148,7 @@ def build_debug_analysis_system(
 
 
 def _api_key() -> str:
-    if _runtime_api_key:
+    if _runtime_api_key is not None:
         return _runtime_api_key
     return os.environ.get("DEEPSEEK_API_KEY", "").strip()
 
@@ -129,17 +162,24 @@ def _model() -> str:
     return DEFAULT_MODEL
 
 
-def _placeholder(version_id: str, task_id: str) -> str:
-    return (
-        "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
-        f"（当前版本={version_id}，任务={task_id}）"
+def _missing_key_reply(version_id: str | None = None, task_id: str | None = None) -> str:
+    base = (
+        "[占位回复] 未配置 API Key：请在主页顶部填写并点击「保存」，"
+        "或设置环境变量 DEEPSEEK_API_KEY。"
     )
+    if version_id is not None and task_id is not None:
+        return base + f"（当前版本={version_id}，任务={task_id}）"
+    return base
+
+
+def _placeholder(version_id: str, task_id: str) -> str:
+    return _missing_key_reply(version_id, task_id)
 
 
 def _complete(system: str, user_message: str) -> str:
     api_key = _api_key()
     if not api_key:
-        return "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
+        return _missing_key_reply()
     try:
         from openai import OpenAI
 
@@ -164,7 +204,7 @@ def _complete_with_history(
 ) -> str:
     api_key = _api_key()
     if not api_key:
-        return "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
+        return _missing_key_reply()
     payload: list[dict[str, str]] = [{"role": "system", "content": system}]
     for m in messages:
         role = m.get("role")

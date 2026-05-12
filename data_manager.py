@@ -156,7 +156,10 @@ def save_task_history(
 def clear_task_history(version_id: str, task_id: str) -> None:
     path = history_path(version_id, task_id)
     if path.is_file():
-        path.unlink()
+        try:
+            path.unlink()
+        except OSError:
+            pass
 
 
 def load_version_code(version_id: str) -> str:

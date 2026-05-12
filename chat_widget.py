@@ -5,12 +5,13 @@ AI 教练 Tab：只读历史区 + 多行输入框 + 发送；读写 data/version
 # 推迟解析类型注解，便于在类型里引用尚未定义的类名（与本项目其它文件一致）
 from __future__ import annotations
 
+import copy
 from collections.abc import Callable
 
 from html import escape as html_escape
 from typing import Any
 
-from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeyEvent, QPalette, QTextCursor
 from PyQt6.QtWidgets import (  # 本文件用到的界面类
     QHBoxLayout,  # 水平布局
@@ -25,6 +26,100 @@ from PyQt6.QtWidgets import (  # 本文件用到的界面类
 import ai_coach  # 调用大模型/占位回复
 import data_manager
 import sections_loader
+
+_PLANNING_BOOTSTRAP_TRIGGER = "请开始本节导读讲解。"
+_EMPTY_ASSISTANT_FALLBACK = "[模型未返回正文，请重试或更换模型。]"
+
+
+def _normalize_assistant_reply(text: str) -> str:
+    s = (text or "").strip()
+    return s if s else _EMPTY_ASSISTANT_FALLBACK
+
+
+def _is_planning_placeholder_bootstrap(hist: list[dict[str, Any]]) -> bool:
+    if len(hist) != 2:
+        return False
+    u0, a0 = hist[0], hist[1]
+    if u0.get("role") != "user" or a0.get("role") != "assistant":
+        return False
+    if u0.get("content") != _PLANNING_BOOTSTRAP_TRIGGER:
+        return False
+    return str(a0.get("content", "")).startswith("[占位回复]")
+
+
+class PlanningBootstrapThread(QThread):
+    """在后台线程调用 ai_coach.chat，避免阻塞 UI 主线程。"""
+
+    finished_ok = pyqtSignal(str, str, str, str)
+    finished_err = pyqtSignal(str, str, str, str)
+
+    def __init__(
+        self,
+        version_id: str,
+        task_id: str,
+        trigger: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._version_id = version_id
+        self._task_id = task_id
+        self._trigger = trigger
+
+    def run(self) -> None:
+        try:
+            reply = ai_coach.chat(
+                self._version_id, self._task_id, [], self._trigger
+            )
+            self.finished_ok.emit(
+                self._version_id, self._task_id, self._trigger, reply
+            )
+        except Exception as exc:
+            self.finished_err.emit(
+                self._version_id,
+                self._task_id,
+                self._trigger,
+                f"{type(exc).__name__}: {exc}",
+            )
+
+
+class CoachChatThread(QThread):
+    """后台执行 ai_coach.chat（带历史），避免主线程在请求 API 时冻结。"""
+
+    finished_ok = pyqtSignal(str, str, str, str)
+    finished_err = pyqtSignal(str, str, str, str)
+
+    def __init__(
+        self,
+        version_id: str,
+        task_id: str,
+        messages: list[dict[str, Any]],
+        user_message: str,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._version_id = version_id
+        self._task_id = task_id
+        self._messages = copy.deepcopy(messages)
+        self._user_message = user_message
+
+    def run(self) -> None:
+        try:
+            reply = ai_coach.chat(
+                self._version_id,
+                self._task_id,
+                self._messages,
+                self._user_message,
+            )
+            self.finished_ok.emit(
+                self._version_id, self._task_id, self._user_message, reply
+            )
+        except Exception as exc:
+            self.finished_err.emit(
+                self._version_id,
+                self._task_id,
+                self._user_message,
+                f"{type(exc).__name__}: {exc}",
+            )
 
 
 class ComposerTextEdit(QTextEdit):
@@ -60,8 +155,7 @@ class ChatWidget(QWidget):
       - 左侧列表切换任务时调用 set_task(new_id)，内部会更新 self._task_id 并重新 load_history。
 
     线程说明：
-      _on_send 里直接调用 ai_coach.chat（同步）。若接口很慢，界面会短暂卡住；
-      以后要优化可改为线程/QTimer/worker，但那是架构升级，本文件保持简单直观。
+      规划导读与（有 API Key 时）普通发送在后台 QThread 中调用网络；无 Key 时占位回复仍同步、立即返回。
     """
 
     def __init__(
@@ -77,6 +171,8 @@ class ChatWidget(QWidget):
         self._program_loader = program_loader or (
             lambda: data_manager.load_version_code(version_id)
         )
+        self._planning_bootstrap_thread: PlanningBootstrapThread | None = None
+        self._chat_send_thread: CoachChatThread | None = None
 
         # ---------- 上方：对话记录 ----------
         self._history_view = QTextEdit()  # 只读区，展示历史气泡
@@ -117,7 +213,7 @@ class ChatWidget(QWidget):
 
         self._update_ctx_label()
         self.load_history()
-        self._bootstrap_if_needed()
+        QTimer.singleShot(0, self._bootstrap_if_needed)
 
     def _debug_task_id(self) -> str | None:
         spec = sections_loader.get_version_spec(self._version_id)
@@ -138,17 +234,32 @@ class ChatWidget(QWidget):
         sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
         title = sec.get("title") if sec else None
         suffix = f" · {title}" if title else ""
-        self._ctx_label.setText(f"AI 教练 · {self._version_id} / {self._task_id}{suffix}")
+        base = f"AI 教练 · {self._version_id} / {self._task_id}{suffix}"
+        if self._chat_send_thread_busy():
+            base += " · 正在请求回复…"
+        elif self._planning_thread_busy() and sec and sec.get("role") == "planning":
+            base += " · 正在获取导读…"
+        self._ctx_label.setText(base)
 
-    def _bootstrap_planning_if_needed(self) -> None:
-        sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
-        if not sec or sec.get("role") != "planning":
+    def _planning_thread_busy(self) -> bool:
+        return bool(
+            self._planning_bootstrap_thread
+            and self._planning_bootstrap_thread.isRunning()
+        )
+
+    def _chat_send_thread_busy(self) -> bool:
+        return bool(self._chat_send_thread and self._chat_send_thread.isRunning())
+
+    def _may_overwrite_with_planning_bootstrap(self) -> bool:
+        """仅当磁盘上仍为空或仍为「无 Key 占位导读」时才允许写入自动导读。"""
+        cur = data_manager.load_task_history(self._version_id, self._task_id)
+        if not cur:
+            return True
+        return _is_planning_placeholder_bootstrap(cur)
+
+    def _save_planning_bootstrap_messages(self, trigger: str, reply: str) -> None:
+        if not self._may_overwrite_with_planning_bootstrap():
             return
-        hist = data_manager.load_task_history(self._version_id, self._task_id)
-        if hist:
-            return
-        trigger = "请开始本节导读讲解。"
-        reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
         data_manager.save_task_history(
             self._version_id,
             self._task_id,
@@ -158,6 +269,159 @@ class ChatWidget(QWidget):
             ],
         )
         self.load_history()
+
+    def _start_planning_bootstrap_async(self, trigger: str) -> None:
+        if self._planning_thread_busy():
+            return
+        th = PlanningBootstrapThread(
+            self._version_id, self._task_id, trigger, self
+        )
+        th.finished_ok.connect(self._on_planning_bootstrap_finished_ok)
+        th.finished_err.connect(self._on_planning_bootstrap_finished_err)
+        th.finished.connect(lambda t=th: self._on_planning_bootstrap_thread_finished(t))
+        self._planning_bootstrap_thread = th
+        th.start()
+        self._update_ctx_label()
+
+    def _on_planning_bootstrap_thread_finished(self, th: QThread) -> None:
+        if self._planning_bootstrap_thread is th:
+            self._planning_bootstrap_thread = None
+        th.deleteLater()
+        self._update_ctx_label()
+
+    def _start_coach_chat_async(
+        self, messages: list[dict[str, Any]], user_text: str
+    ) -> None:
+        if self._chat_send_thread_busy():
+            return
+        th = CoachChatThread(
+            self._version_id, self._task_id, messages, user_text, self
+        )
+        th.finished_ok.connect(self._on_coach_chat_finished_ok)
+        th.finished_err.connect(self._on_coach_chat_finished_err)
+        th.finished.connect(lambda t=th: self._on_coach_chat_thread_finished(t))
+        self._chat_send_thread = th
+        th.start()
+        self._update_ctx_label()
+
+    def _on_coach_chat_thread_finished(self, th: QThread) -> None:
+        if self._chat_send_thread is th:
+            self._chat_send_thread = None
+        th.deleteLater()
+        self._update_ctx_label()
+
+    def _on_coach_chat_finished_ok(
+        self, vid: str, tid: str, user_text: str, reply: str
+    ) -> None:
+        if vid != self._version_id or tid != self._task_id:
+            QMessageBox.information(
+                self,
+                "回复未写入",
+                "您已切换到其他版本或任务，上一条网络回复已丢弃，未写入当前对话。",
+            )
+            return
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        if not hist:
+            QMessageBox.information(
+                self,
+                "回复未写入",
+                "本地对话记录为空，无法写入助手回复（可能已清空或切换了任务）。",
+            )
+            return
+        last = hist[-1]
+        if last.get("role") != "user" or last.get("content") != user_text:
+            QMessageBox.information(
+                self,
+                "回复未写入",
+                "当前对话末尾与发送时的内容不一致，上一条回复已丢弃，避免写错记录。",
+            )
+            return
+        body = _normalize_assistant_reply(reply)
+        hist.append({"role": "assistant", "content": body})
+        data_manager.save_task_history(self._version_id, self._task_id, hist)
+        self.load_history()
+
+    def _on_coach_chat_finished_err(
+        self, vid: str, tid: str, user_text: str, err: str
+    ) -> None:
+        if vid != self._version_id or tid != self._task_id:
+            QMessageBox.information(
+                self,
+                "错误未写入",
+                "您已切换到其他版本或任务，该次请求失败信息未写入当前对话。",
+            )
+            return
+        QMessageBox.warning(self, "教练请求失败", err)
+        reply = f"[错误] {err}"
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        if not hist:
+            QMessageBox.information(
+                self,
+                "错误未写入",
+                "本地对话记录为空，无法写入错误说明。",
+            )
+            return
+        last = hist[-1]
+        if last.get("role") != "user" or last.get("content") != user_text:
+            QMessageBox.information(
+                self,
+                "错误未写入",
+                "当前对话末尾与发送时的内容不一致，未追加错误说明。",
+            )
+            return
+        hist.append({"role": "assistant", "content": reply})
+        data_manager.save_task_history(self._version_id, self._task_id, hist)
+        self.load_history()
+
+    def _on_planning_bootstrap_finished_ok(
+        self, vid: str, tid: str, trigger: str, reply: str
+    ) -> None:
+        if vid != self._version_id or tid != self._task_id:
+            QMessageBox.information(
+                self,
+                "导读未写入",
+                "您已切换到其他版本或任务，自动导读结果已丢弃。",
+            )
+            return
+        self._save_planning_bootstrap_messages(
+            trigger, _normalize_assistant_reply(reply)
+        )
+
+    def _on_planning_bootstrap_finished_err(
+        self, vid: str, tid: str, trigger: str, err: str
+    ) -> None:
+        if vid != self._version_id or tid != self._task_id:
+            QMessageBox.information(
+                self,
+                "导读未写入",
+                "您已切换到其他版本或任务，导读错误信息已丢弃。",
+            )
+            return
+        self._save_planning_bootstrap_messages(trigger, f"[错误] {err}")
+
+    def _bootstrap_planning_if_needed(self) -> None:
+        sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
+        if not sec or sec.get("role") != "planning":
+            return
+        if self._planning_thread_busy():
+            return
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        trigger = _PLANNING_BOOTSTRAP_TRIGGER
+        if hist:
+            if _is_planning_placeholder_bootstrap(hist) and ai_coach.has_api_key():
+                self._start_planning_bootstrap_async(trigger)
+            return
+        if ai_coach.has_api_key():
+            self._start_planning_bootstrap_async(trigger)
+        else:
+            reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
+            self._save_planning_bootstrap_messages(
+                trigger, _normalize_assistant_reply(reply)
+            )
+
+    def refresh_bootstrap(self) -> None:
+        """主页保存 API 后再次进入本版本页时调用，用于补发导读等占位重试。"""
+        self._bootstrap_if_needed()
 
     def _bootstrap_debug_if_needed(self) -> None:
         hist = data_manager.load_task_history(self._version_id, self._task_id)
@@ -221,7 +485,18 @@ class ChatWidget(QWidget):
             slot["current_sample_index"] = 0
             data_manager.save_version_state(self._version_id, state)
         self._history_view.clear()
-        self._bootstrap_if_needed()
+        QTimer.singleShot(0, self._safe_bootstrap_after_clear)
+
+    def _safe_bootstrap_after_clear(self) -> None:
+        try:
+            self._bootstrap_if_needed()
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "恢复对话",
+                f"清空后自动重建导读失败：\n{type(exc).__name__}: {exc}\n\n"
+                "可稍后手动发送一条消息重试。",
+            )
 
     def _on_clear_clicked(self) -> None:
         ok = QMessageBox.question(
@@ -329,6 +604,13 @@ class ChatWidget(QWidget):
         text = self._input.toPlainText().strip()
         if not text:
             return
+        if self._chat_send_thread_busy():
+            QMessageBox.information(
+                self,
+                "请稍候",
+                "上一条消息仍在请求中，请等待回复后再发送。",
+            )
+            return
         self._input.clear()
         if self._is_debug_task():
             self._on_send_debug(text)
@@ -336,6 +618,12 @@ class ChatWidget(QWidget):
         hist = data_manager.load_task_history(self._version_id, self._task_id)
         self.append_message("user", text)
         hist.append({"role": "user", "content": text})
+        data_manager.save_task_history(self._version_id, self._task_id, hist)
+
+        if ai_coach.has_api_key():
+            self._start_coach_chat_async(hist[:-1], text)
+            return
+
         try:
             reply = ai_coach.chat(
                 self._version_id,
@@ -346,6 +634,7 @@ class ChatWidget(QWidget):
         except Exception as exc:
             reply = f"[错误] {exc}"
             QMessageBox.warning(self, "教练请求失败", str(exc))
+        reply = _normalize_assistant_reply(reply)
         self.append_message("assistant", reply)
         hist.append({"role": "assistant", "content": reply})
         data_manager.save_task_history(self._version_id, self._task_id, hist)
@@ -386,6 +675,7 @@ class ChatWidget(QWidget):
             reply = ai_coach.analyze_debug_mismatch(
                 self._version_id, sample, text, program
             )
+        reply = _normalize_assistant_reply(reply)
         self.append_message("assistant", reply)
         hist.append({"role": "assistant", "content": reply})
         data_manager.save_task_history(self._version_id, self._task_id, hist)

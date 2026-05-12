@@ -89,6 +89,9 @@ class VersionPage(QWidget):
     self._load_code_from_disk()
     self._rebuild_task_tree()
 
+  def refresh_bootstrap(self) -> None:
+    self._chat.refresh_bootstrap()
+
   def _load_code_from_disk(self) -> None:
     self._code_loading = True
     self._code_editor.setPlainText(data_manager.load_version_code(self._version_id))
@@ -224,7 +227,7 @@ class VersionPage(QWidget):
       return
     state = data_manager.load_version_state(self._version_id)
     tree_state = sections_loader.ensure_tree_state(state)
-    tree_state.setdefault("h2_expanded", {})[h2] = self._task_tree.isItemExpanded(item)
+    tree_state.setdefault("h2_expanded", {})[h2] = item.isExpanded()
     data_manager.save_version_state(self._version_id, state)
 
   def _on_current_leaf_changed(

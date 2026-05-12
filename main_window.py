@@ -29,18 +29,22 @@
 # 让当前文件里可以用「list[str]」这种写法标注类型（Python 3.9+ 也可不用这行；写上兼容旧习惯）
 from __future__ import annotations
 
-# 第三方：PyQt6 窗口与布局控件
+import time
+
+from PyQt6.QtCore import QEventLoop, QThread, QTimer, pyqtSignal, Qt
 from PyQt6.QtWidgets import (
     QComboBox,
-    QHBoxLayout,  # 水平布局：子控件从左到右排列
-    QLabel,  # 静态文字标签
+    QHBoxLayout,
+    QLabel,
     QLineEdit,
-    QMainWindow,  # 标准主窗口框架（本类的基类）
+    QMainWindow,
     QMessageBox,
-    QPushButton,  # 可点击按钮，发出 clicked 信号
-    QStackedWidget,  # 多页叠放、只显示一页的切换容器
-    QVBoxLayout,  # 垂直布局：子控件从上到下排列
-    QWidget,  # 通用矩形控件基类；可作为一页的「根容器」
+    QProgressDialog,
+    QPushButton,
+    QStackedWidget,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
 )
 
 # 同项目：某一魔兽版本的完整页面（左任务树 + 右 Tab）
@@ -64,6 +68,17 @@ MODEL_OPTIONS = (
     ("deepseek-v4-pro", "DeepSeek V4 Pro"),
     ("deepseek-chat", "deepseek-chat（兼容）"),
 )
+
+API_PING_UI_SECONDS = int(ai_coach.API_PING_TIMEOUT_SECONDS)
+
+
+class ApiPingThread(QThread):
+    """后台调用 ai_coach.ping_api，避免阻塞 UI。"""
+
+    finished_with_result = pyqtSignal(object)
+
+    def run(self) -> None:
+        self.finished_with_result.emit(ai_coach.ping_api())
 
 
 class MainWindow(QMainWindow):
@@ -95,15 +110,27 @@ class MainWindow(QMainWindow):
         for model_id, label in MODEL_OPTIONS:
             self._model_combo.addItem(label, model_id)
         api_row.addWidget(self._model_combo)
+        api_key_wrap = QWidget()
+        api_key_wrap_layout = QHBoxLayout(api_key_wrap)
+        api_key_wrap_layout.setContentsMargins(0, 0, 0, 0)
+        api_key_wrap_layout.setSpacing(4)
         self._api_key_input = QLineEdit()
         self._api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         self._api_key_input.setPlaceholderText(
             "未填写时使用环境变量 DEEPSEEK_API_KEY；均未配置则返回占位回复"
         )
-        api_row.addWidget(self._api_key_input, stretch=1)
+        api_key_wrap_layout.addWidget(self._api_key_input, stretch=1)
+        self._api_key_visibility_btn = QToolButton()
+        self._api_key_visibility_btn.setText("👁")
+        self._api_key_visibility_btn.setCheckable(True)
+        self._api_key_visibility_btn.setToolTip("显示 / 隐藏 API Key")
+        self._api_key_visibility_btn.toggled.connect(self._on_api_key_visibility_toggled)
+        api_key_wrap_layout.addWidget(self._api_key_visibility_btn, stretch=0)
+        api_row.addWidget(api_key_wrap, stretch=1)
         save_api_btn = QPushButton("保存")
         save_api_btn.clicked.connect(self._save_api_settings)
         api_row.addWidget(save_api_btn)
+        self._save_api_btn = save_api_btn
         home_layout.addLayout(api_row)
 
         home_layout.addWidget(QLabel("选择题目版本"))  # 顶部提示文字；QLabel 默认不接收点击
@@ -138,10 +165,13 @@ class MainWindow(QMainWindow):
         # self._version_pages：实例属性；前导 _ 表示约定「类内部使用」。
         # dict[str, VersionPage]：类型标注（键为版本字符串，值为页面对象）；运行时不强制检查。
         self._version_pages: dict[str, VersionPage] = {}
+        self._api_verified_ok = False
 
         # 把整个栈交给主窗口中央区域；此后可见内容完全由 _stack 当前页决定
         self.setCentralWidget(self._stack)
         self._apply_api_settings_from_disk()
+        self._refresh_version_buttons_enabled()
+        QTimer.singleShot(0, self._startup_api_verify_if_needed)
 
     def _model_id_from_combo(self) -> str:
         model_id = self._model_combo.currentData()
@@ -157,18 +187,132 @@ class MainWindow(QMainWindow):
                 return
         self._model_combo.setCurrentIndex(0)
 
+    def _on_api_key_visibility_toggled(self, visible: bool) -> None:
+        self._api_key_input.setEchoMode(
+            QLineEdit.EchoMode.Normal if visible else QLineEdit.EchoMode.Password
+        )
+
     def _apply_api_settings_from_disk(self) -> None:
         settings = data_manager.load_app_settings()
         self._set_model_combo(settings["model"])
         self._api_key_input.setText(settings["api_key"])
+        if self._api_key_visibility_btn.isChecked():
+            self._api_key_input.setEchoMode(QLineEdit.EchoMode.Normal)
+        else:
+            self._api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
         ai_coach.set_runtime_config(settings["api_key"], settings["model"])
+
+    def _set_home_api_controls_enabled(self, enabled: bool) -> None:
+        self._model_combo.setEnabled(enabled)
+        self._api_key_input.setEnabled(enabled)
+        self._api_key_visibility_btn.setEnabled(enabled)
+        self._save_api_btn.setEnabled(enabled)
+
+    def _refresh_version_buttons_enabled(self) -> None:
+        """有 Key 且已通过 ping 才可进版本；无 Key 时按钮可点，由 _open_version 提示填写。"""
+        can_enter = (not ai_coach.has_api_key()) or self._api_verified_ok
+        for _vid, btn in self._home_version_buttons:
+            btn.setEnabled(can_enter)
+        self._refresh_home_progress_labels()
+
+    def _run_api_ping_modal(self) -> bool:
+        """模态进度与倒计时；成功返回 True。无取消按钮，依赖客户端超时结束。"""
+        dlg = QProgressDialog(self)
+        dlg.setWindowTitle("验证 API")
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.setMinimumDuration(0)
+        dlg.setRange(0, 0)
+        dlg.setCancelButton(None)
+        dlg.show()
+
+        self._set_home_api_controls_enabled(False)
+
+        t0 = time.monotonic()
+        err_out: list[str | None] = [None]
+        loop = QEventLoop()
+
+        th = ApiPingThread(self)
+
+        def on_result(res: object) -> None:
+            err_out[0] = res if isinstance(res, str) else None
+            loop.quit()
+
+        th.finished_with_result.connect(on_result)
+
+        timer = QTimer(self)
+
+        def tick() -> None:
+            elapsed = time.monotonic() - t0
+            rem = max(0, API_PING_UI_SECONDS - int(elapsed))
+            dlg.setLabelText(
+                "正在连接 DeepSeek 并校验 API…\n"
+                f"已用约 {elapsed:.0f} 秒；预计还需约 {rem} 秒"
+                f"（单次上限 {API_PING_UI_SECONDS} 秒，为保守估计）。"
+            )
+
+        timer.timeout.connect(tick)
+        tick()
+        timer.start(200)
+        th.start()
+        loop.exec()
+        timer.stop()
+        th.wait()
+        dlg.close()
+        self._set_home_api_controls_enabled(True)
+
+        err = err_out[0]
+        if err is not None:
+            QMessageBox.warning(self, "API 验证失败", err)
+            return False
+        return True
+
+    def _startup_api_verify_if_needed(self) -> None:
+        if not ai_coach.has_api_key():
+            self._api_verified_ok = False
+            self._refresh_version_buttons_enabled()
+            return
+        ok = self._run_api_ping_modal()
+        self._api_verified_ok = ok
+        self._refresh_version_buttons_enabled()
+        if not ok:
+            QMessageBox.information(
+                self,
+                "API 未就绪",
+                "已保存的 API Key 未能通过连接验证，暂不能进入版本页。\n"
+                "请检查网络与 Key 后点击「保存」重试。",
+            )
 
     def _save_api_settings(self) -> None:
         model = self._model_id_from_combo()
         api_key = self._api_key_input.text().strip()
         data_manager.save_app_settings({"api_key": api_key, "model": model})
         ai_coach.set_runtime_config(api_key, model)
-        QMessageBox.information(self, "已保存", "API 配置已保存到本机。")
+        self._api_verified_ok = False
+        self._refresh_version_buttons_enabled()
+
+        if ai_coach.has_api_key():
+            ok = self._run_api_ping_modal()
+            self._api_verified_ok = ok
+            self._refresh_version_buttons_enabled()
+            if ok:
+                QMessageBox.information(
+                    self,
+                    "已保存",
+                    "API 配置已保存到本机，连接验证通过。",
+                )
+            else:
+                QMessageBox.warning(
+                    self,
+                    "已保存",
+                    "配置已写入本机，但连接验证未通过，暂不能进入版本页。\n"
+                    "请检查网络与 Key 后再次点击「保存」。",
+                )
+        else:
+            QMessageBox.information(
+                self,
+                "已保存",
+                "API 配置已保存到本机。（当前无可用 Key：进入版本页时会提示填写。）",
+            )
 
     def _refresh_home_progress_labels(self) -> None:
         """主页按钮展示「已勾选 / 左侧全部复选框」计数（见 sections_loader）。"""
@@ -181,6 +325,22 @@ class MainWindow(QMainWindow):
 
     def _open_version(self, version_id: str) -> None:
         """响应主页按钮：切换到对应版本的 VersionPage（必要时先创建）。"""
+        self._apply_api_settings_from_disk()
+        if not ai_coach.has_api_key():
+            QMessageBox.information(
+                self,
+                "需要 API Key",
+                "请先在主页顶部填写 API Key，并点击「保存」完成验证后再进入版本。",
+            )
+            return
+        if not self._api_verified_ok:
+            QMessageBox.information(
+                self,
+                "请完成验证",
+                "请先点击「保存」并等待 API 连接验证通过后再进入版本。\n"
+                "若刚启动应用，请等待自动验证结束或重新保存一次。",
+            )
+            return
         # version_id 与 VERSION_ENTRIES、prompts、JSON 中的键一致，例如 "version1"
         if version_id not in self._version_pages:
             page = VersionPage(version_id)
@@ -192,6 +352,7 @@ class MainWindow(QMainWindow):
 
         # 已创建则直接切换可见页；setCurrentWidget 不重复添加控件，仅改变当前显示的子控件
         self._stack.setCurrentWidget(self._version_pages[version_id])
+        self._version_pages[version_id].refresh_bootstrap()
 
     def _go_home(self) -> None:
         """

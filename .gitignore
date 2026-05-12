@@ -7,4 +7,7 @@ build/
 .env
 .venv/
 venv/
-data/user_data.json
+data/version*/state.json
+data/version*/code.cpp
+data/version*/history/
+data/app_settings.json

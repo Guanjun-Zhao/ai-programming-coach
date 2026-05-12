@@ -18,8 +18,8 @@
    - `[x for x in raw if isinstance(x, dict)]`：列表推导，只保留 JSON 对象条目。
 
 与其它文件的衔接：
-- samples.json 里 version_id / task_id 必须与 VersionPage、user_data 等处命名一致。
-- get_samples 依赖 data_manager.load_samples()（进程内按 samples.json 修改时间缓存）。
+- Debug 样例来自 data/versionN/samples.json；version_id / task_id 须与 VersionPage、user_data 等处命名一致。
+- get_samples 依赖 data_manager.load_version_samples()（进程内按文件修改时间缓存）。
 
 类型标注：`from __future__ import annotations` 与其它模块一致。
 """
@@ -41,28 +41,18 @@ from PyQt6.QtWidgets import (
     QWidget,  # 通用控件基类；本类的父类
 )
 
-# 同项目：读取 data/samples.json（带 mtime 缓存）
+# 同项目：读取 data/versionN/samples.json（带 mtime 缓存）
 import data_manager
+import sections_loader
 
 
 def get_samples(version_id: str, task_id: str) -> list[dict[str, Any]]:
-    """
-    从嵌套结构 samples.json 中取出「某版本 → 某任务」下的样例数组。
-
-    形状示意：{"version1": {"task1": [ {...}, ... ]}}；元素非 dict 的会被过滤。
-    """
-    # 整库 dict；同一进程内多次调用可能命中 data_manager 内的 mtime 缓存
-    all_samples = data_manager.load_samples()
-    # get 不到版本键时得到 None，or {} 避免后续对 None 再 .get
-    ver = all_samples.get(version_id) or {}
-    raw = ver.get(task_id)
-    if raw is None:
+    """Return debug samples from data/versionN/samples.json for the debug task."""
+    spec = sections_loader.get_version_spec(version_id)
+    debug_task_id = spec.get("debug_task_id")
+    if not debug_task_id or task_id != debug_task_id:
         return []
-    if isinstance(raw, list):
-        # JSON 若被手改混入非对象元素，跳过以免下游假设每条都是 dict
-        return [x for x in raw if isinstance(x, dict)]
-    # task 对应的不是数组（例如误写成字符串）则视为无样例
-    return []
+    return data_manager.load_version_samples(version_id)
 
 
 def format_sample_detail(one_based_index: int, sample: dict[str, Any]) -> str:
@@ -169,7 +159,7 @@ class SampleLibraryWidget(QWidget):
         self._list.clear()
         if not samples:
             self._list.blockSignals(False)
-            self._detail.setPlainText("（暂无样例，请在 data/samples.json 中配置）")
+            self._detail.setPlainText("（暂无样例，请在 data/versionN/samples.json 中配置）")
             return
 
         for i in range(len(samples)):

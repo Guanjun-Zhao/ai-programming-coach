@@ -11,6 +11,11 @@ ROOT_DIR = Path(__file__).resolve().parent
 SECTIONS_PATH = ROOT_DIR / "data" / "sections.json"
 
 _SECTIONS_CACHE: tuple[int, dict[str, Any]] | None = None
+_VERSION_SPEC_CACHE: dict[str, tuple[int, dict[str, Any]]] = {}
+
+
+def _version_sections_path(version_id: str) -> Path:
+    return ROOT_DIR / "data" / version_id / "sections.json"
 
 
 def load_sections() -> dict[str, Any]:
@@ -33,6 +38,21 @@ def load_sections() -> dict[str, Any]:
 
 
 def get_version_spec(version_id: str) -> dict[str, Any]:
+    path = _version_sections_path(version_id)
+    if path.is_file():
+        global _VERSION_SPEC_CACHE
+        try:
+            mtime_ns = path.stat().st_mtime_ns
+            cached = _VERSION_SPEC_CACHE.get(version_id)
+            if cached is not None and cached[0] == mtime_ns:
+                return cached[1]
+            text = path.read_text(encoding="utf-8")
+            parsed: dict[str, Any] = json.loads(text) if text.strip() else {}
+            _VERSION_SPEC_CACHE[version_id] = (mtime_ns, parsed)
+            return parsed
+        except (json.JSONDecodeError, OSError):
+            _VERSION_SPEC_CACHE.pop(version_id, None)
+            return {}
     return load_sections().get(version_id) or {}
 
 

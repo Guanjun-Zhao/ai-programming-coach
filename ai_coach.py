@@ -1,54 +1,45 @@
 """
-本模块：调用 DeepSeek 的聊天接口（兼容 OpenAI SDK），并挂上「系统提示词」。
-
-初学者可以这样理解整个文件：
-1. get_system_prompt：从磁盘读取某个版本题目对应的「教练人设 + 规则」长文本。
-2. chat：把「系统提示 + 历史对话 + 本轮用户输入」发给模型，拿回模型回复字符串。
-
-类型标注：`from __future__ import annotations` 与其它模块一致。
+DeepSeek chat (OpenAI-compatible): teaching, verification, and debug analysis.
 """
 
-# 推迟注解求值，便于在类型里引用尚未定义的类名等（与本项目其它文件一致）
 from __future__ import annotations
 
-# 用于读取环境变量 DEEPSEEK_API_KEY、DEEPSEEK_MODEL
 import os
-# 表示路径，便于拼接 prompts 目录与版本文件名
 from pathlib import Path
-# 历史消息列表里每条是 dict，用 Any 兼容额外字段
 from typing import Any
 
 import sections_loader
 
-# 本文件所在目录，作为项目根下的相对路径锚点
 ROOT_DIR = Path(__file__).resolve().parent
-# 存放各版本系统提示词文本的目录（如 prompts/version1.txt）
 PROMPTS_DIR = ROOT_DIR / "prompts"
 
-# DeepSeek 官方 API 基地址（OpenAI 兼容接口）
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-# 未设置 DEEPSEEK_MODEL 时使用的默认模型名
-DEFAULT_MODEL = "deepseek-chat"
+DEFAULT_MODEL = "deepseek-v4-flash"
+
+_runtime_api_key: str | None = None
+_runtime_model: str | None = None
+
+
+def set_runtime_config(api_key: str, model: str) -> None:
+    global _runtime_api_key, _runtime_model
+    _runtime_api_key = api_key.strip()
+    _runtime_model = model.strip() or None
+
+
+def get_runtime_model() -> str:
+    return _model()
 
 
 def get_system_prompt(version_id: str) -> str:
-    """
-    读取 prompts/{version_id}.txt（例如 version1 -> prompts/version1.txt）。
-    缺失时返回占位说明，避免崩溃。
-    """
-    # 按版本 id 拼出对应的提示词文件路径
     path = PROMPTS_DIR / f"{version_id}.txt"
-    # 若文件存在，则按 UTF-8 读取并去掉首尾空白
     if path.is_file():
         return path.read_text(encoding="utf-8").strip()
-    # 缺少文件时返回中文占位串，提示用户在 prompts/ 下补充
     return (
         f"[占位] 未找到 {path.name}，请在 prompts/ 下添加该版本的 System Prompt 文本。"
     )
 
 
 def _looks_like_code_snippet(text: str) -> bool:
-    """Heuristic: multi-line snippet that looks like C/C++ source."""
     t = text.strip()
     if len(t) < 40:
         return False
@@ -58,7 +49,6 @@ def _looks_like_code_snippet(text: str) -> bool:
 
 
 def build_task_system(version_id: str, task_id: str) -> str:
-    """Base coach prompt + current leaf section description from sections.json."""
     base = get_system_prompt(version_id)
     sec = sections_loader.get_leaf_section(version_id, task_id)
     if not sec:
@@ -84,19 +74,156 @@ def build_task_system(version_id: str, task_id: str) -> str:
     )
 
 
+def build_verify_system(version_id: str, task_id: str, user_code: str) -> str:
+    sec = sections_loader.get_leaf_section(version_id, task_id) or {}
+    title = str(sec.get("title", task_id))
+    ref = str(sec.get("code", ""))
+    return (
+        "你是一名 C++ 编程教练，正在做代码逻辑验证（内部资料，不得向用户泄露参考代码）。\n"
+        f"当前小节：{title}\n\n"
+        "以下是本节的参考代码（内部资料，不得输出给用户）和用户提交的代码。"
+        "请判断用户代码是否实现了与参考代码等价的逻辑功能。只判断逻辑正确性，不评价代码风格。\n"
+        "- 如果通过：输出「你的代码已完成这部分的功能。输入「下一步」，让我们继续下一节的书写。」\n"
+        "- 如果未通过：用自然语言指出缺少或有误的逻辑点，不要给出正确代码。\n\n"
+        "【参考代码（内部）】\n"
+        f"{ref}\n\n"
+        "【用户提交的代码】\n"
+        f"{user_code}"
+    )
+
+
+def build_debug_analysis_system(
+    version_id: str,
+    sample: dict[str, Any],
+    user_output: str,
+    program_source: str,
+) -> str:
+    base = get_system_prompt(version_id)
+    inp = str(sample.get("input", ""))
+    expected = str(sample.get("output", ""))
+    return (
+        base
+        + "\n\n【Debug 错误分析】\n"
+        + "用户程序输出与期望不一致。结合样例输入、期望输出、用户实际输出与完整程序，"
+        + "用自然语言分析可能的逻辑错误位置并引导修改；不要直接给出修改后的完整代码。\n\n"
+        + f"【样例输入】\n{inp}\n\n"
+        + f"【期望输出】\n{expected}\n\n"
+        + f"【用户实际输出】\n{user_output}\n\n"
+        + "【用户完整程序（内部，勿复述全文）】\n"
+        + program_source
+    )
+
+
+def _api_key() -> str:
+    if _runtime_api_key:
+        return _runtime_api_key
+    return os.environ.get("DEEPSEEK_API_KEY", "").strip()
+
+
+def _model() -> str:
+    if _runtime_model:
+        return _runtime_model
+    env_model = os.environ.get("DEEPSEEK_MODEL", "").strip()
+    if env_model:
+        return env_model
+    return DEFAULT_MODEL
+
+
+def _placeholder(version_id: str, task_id: str) -> str:
+    return (
+        "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
+        f"（当前版本={version_id}，任务={task_id}）"
+    )
+
+
+def _complete(system: str, user_message: str) -> str:
+    api_key = _api_key()
+    if not api_key:
+        return "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+        completion = client.chat.completions.create(
+            model=_model(),
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        choice = completion.choices[0].message
+        return (choice.content or "").strip()
+    except Exception as exc:
+        return f"[API 错误] {type(exc).__name__}: {exc}"
+
+
+def _complete_with_history(
+    system: str,
+    messages: list[dict[str, Any]],
+    user_message: str,
+) -> str:
+    api_key = _api_key()
+    if not api_key:
+        return "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
+    payload: list[dict[str, str]] = [{"role": "system", "content": system}]
+    for m in messages:
+        role = m.get("role")
+        content = m.get("content")
+        if role in ("user", "assistant") and isinstance(content, str):
+            payload.append({"role": role, "content": content})
+    payload.append({"role": "user", "content": user_message})
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
+        completion = client.chat.completions.create(
+            model=_model(),
+            messages=payload,
+        )
+        choice = completion.choices[0].message
+        return (choice.content or "").strip()
+    except Exception as exc:
+        return f"[API 错误] {type(exc).__name__}: {exc}"
+
+
+def should_verify(version_id: str, task_id: str, user_message: str) -> bool:
+    sec = sections_loader.get_leaf_section(version_id, task_id)
+    if not sec or sec.get("skip_code_verify"):
+        return False
+    if sec.get("role") in ("planning", "debug"):
+        return False
+    ref = str(sec.get("code", "")).strip()
+    if not ref:
+        return False
+    return _looks_like_code_snippet(user_message)
+
+
+def chat_verify(version_id: str, task_id: str, user_code: str) -> str:
+    system = build_verify_system(version_id, task_id, user_code)
+    return _complete(system, "请验证我提交的代码是否与本节要求逻辑等价。")
+
+
+def analyze_debug_mismatch(
+    version_id: str,
+    sample: dict[str, Any],
+    user_output: str,
+    program_source: str,
+) -> str:
+    system = build_debug_analysis_system(
+        version_id, sample, user_output, program_source
+    )
+    return _complete(
+        system,
+        "请分析输出不一致的可能原因，并引导我修改程序（不要给出完整修改后代码）。",
+    )
+
+
 def chat(
     version_id: str,
     task_id: str,
     messages: list[dict[str, Any]],
     user_message: str,
 ) -> str:
-    """
-    发送一轮用户消息，返回助手回复文本（同步）。
-    messages：此前多轮历史，每项为 {"role":"user"|"assistant","content": str}。
-    未配置 DEEPSEEK_API_KEY 时返回占位字符串，便于无密钥联调界面。
-
-    task_id：当前叶子任务 id；与 `sections.json` 组合为 `build_task_system` 注入本节说明。
-    """
     sec = sections_loader.get_leaf_section(version_id, task_id)
     if sec and sec.get("skip_code_verify") and _looks_like_code_snippet(user_message):
         return (
@@ -104,46 +231,12 @@ def chat(
             "请切换到左侧具体编码小节后再粘贴代码，或继续用文字提问。"
         )
 
-    # 从环境变量读取密钥，缺省为空串；strip 去掉无意中的空格换行
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "").strip()
+    if should_verify(version_id, task_id, user_message):
+        return chat_verify(version_id, task_id, user_message)
+
+    api_key = _api_key()
     system = build_task_system(version_id, task_id)
-
-    # 发给模型的消息列表：先放一条 system，角色与内容均为字符串（API 要求）
-    payload_messages: list[dict[str, str]] = [{"role": "system", "content": system}]
-    # 把界面传入的多轮历史逐条规范化后加入 payload
-    for m in messages:
-        # 每条历史期望含 role
-        role = m.get("role")
-        # 每条历史期望含 content
-        content = m.get("content")
-        # 只接受 user/assistant 且 content 为 str，避免脏数据打进请求
-        if role in ("user", "assistant") and isinstance(content, str):
-            payload_messages.append({"role": role, "content": content})
-    # 本轮用户新输入作为最后一条 user 消息
-    payload_messages.append({"role": "user", "content": user_message})
-
-    # 没有 API 密钥时不请求网络，返回可读的占位说明（含版本与任务便于调试）
     if not api_key:
-        return (
-            "[占位回复] 未设置环境变量 DEEPSEEK_API_KEY。"
-            f"（当前版本={version_id}，任务={task_id}）"
-        )
+        return _placeholder(version_id, task_id)
 
-    try:
-        # 延迟导入：无密钥跑界面时可以不装 openai 包也能启动（直到真正调用 chat）
-        from openai import OpenAI
-
-        # 使用 OpenAI 兼容客户端连接 DeepSeek 基地址
-        client = OpenAI(api_key=api_key, base_url=DEEPSEEK_BASE_URL)
-        # 发起聊天补全请求；模型名可由环境变量覆盖
-        completion = client.chat.completions.create(
-            model=os.environ.get("DEEPSEEK_MODEL", DEFAULT_MODEL),
-            messages=payload_messages,
-        )
-        # 取第一条候选里的助手消息对象
-        choice = completion.choices[0].message
-        # content 可能为 None，统一转成字符串并去掉首尾空白
-        return (choice.content or "").strip()
-    except Exception as exc:
-        # 网络、鉴权、解析等任一环节出错时，把错误类型与信息返回给界面展示
-        return f"[API 错误] {type(exc).__name__}: {exc}"
+    return _complete_with_history(system, messages, user_message)

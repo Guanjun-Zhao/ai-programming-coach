@@ -56,11 +56,10 @@ def get_version_spec(version_id: str) -> dict[str, Any]:
     return load_sections().get(version_id) or {}
 
 
-def ensure_tree_state(data: dict[str, Any], version_id: str) -> dict[str, Any]:
-    """Return _tree dict for version (h2_expanded, h2_completed)."""
-    data.setdefault(version_id, {})
-    data[version_id].setdefault("_tree", {"h2_expanded": {}, "h2_completed": {}})
-    tree = data[version_id]["_tree"]
+def ensure_tree_state(state: dict[str, Any]) -> dict[str, Any]:
+    """Return _tree dict (h2_expanded, h2_completed) on a version state object."""
+    state.setdefault("_tree", {"h2_expanded": {}, "h2_completed": {}})
+    tree = state["_tree"]
     tree.setdefault("h2_expanded", {})
     tree.setdefault("h2_completed", {})
     return tree
@@ -104,17 +103,38 @@ def progress_denominator(version_id: str) -> int:
     return max(n, 1)
 
 
-def progress_numerator(data: dict[str, Any], version_id: str) -> int:
+def iter_coding_leaf_task_ids(version_id: str) -> list[str]:
+    spec = get_version_spec(version_id)
+    debug_tid = spec.get("debug_task_id")
+    ids: list[str] = []
+    for g in spec.get("groups") or []:
+        for sec in g.get("sections") or []:
+            tid = sec.get("task_id")
+            if tid and tid != debug_tid:
+                ids.append(str(tid))
+    return ids
+
+
+def all_coding_leaves_completed(state: dict[str, Any], version_id: str) -> bool:
+    ids = iter_coding_leaf_task_ids(version_id)
+    if not ids:
+        return True
+    for tid in ids:
+        if not (state.get(tid) or {}).get("completed"):
+            return False
+    return True
+
+
+def progress_numerator(state: dict[str, Any], version_id: str) -> int:
     spec = get_version_spec(version_id)
     if not spec:
         return 0
-    ver = data.get(version_id) or {}
-    tree = ensure_tree_state(data, version_id)
+    tree = ensure_tree_state(state)
     h2_done = tree.get("h2_completed") or {}
     done = 0
     if spec.get("planning"):
         tid = spec["planning"]["task_id"]
-        if (ver.get(tid) or {}).get("completed"):
+        if (state.get(tid) or {}).get("completed"):
             done += 1
     for g in spec.get("groups") or []:
         h2_id = g.get("h2_id")
@@ -122,10 +142,10 @@ def progress_numerator(data: dict[str, Any], version_id: str) -> int:
             done += 1
         for sec in g.get("sections") or []:
             tid = sec.get("task_id")
-            if tid and (ver.get(tid) or {}).get("completed"):
+            if tid and (state.get(tid) or {}).get("completed"):
                 done += 1
     dt = spec.get("debug_task_id")
-    if dt and (ver.get(dt) or {}).get("completed"):
+    if dt and (state.get(dt) or {}).get("completed"):
         done += 1
     return done
 

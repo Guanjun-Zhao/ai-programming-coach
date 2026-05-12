@@ -31,9 +31,12 @@ from __future__ import annotations
 
 # 第三方：PyQt6 窗口与布局控件
 from PyQt6.QtWidgets import (
+    QComboBox,
     QHBoxLayout,  # 水平布局：子控件从左到右排列
     QLabel,  # 静态文字标签
+    QLineEdit,
     QMainWindow,  # 标准主窗口框架（本类的基类）
+    QMessageBox,
     QPushButton,  # 可点击按钮，发出 clicked 信号
     QStackedWidget,  # 多页叠放、只显示一页的切换容器
     QVBoxLayout,  # 垂直布局：子控件从上到下排列
@@ -43,6 +46,7 @@ from PyQt6.QtWidgets import (
 # 同项目：某一魔兽版本的完整页面（左任务树 + 右 Tab）
 from version_page import VersionPage
 
+import ai_coach
 import data_manager
 import sections_loader
 
@@ -53,6 +57,12 @@ VERSION_ENTRIES = (
     ("version2", "魔兽世界二 · 装备"),
     ("version3", "魔兽世界三 · 开战"),
     ("version4", "魔兽世界四 · 终极版"),
+)
+
+MODEL_OPTIONS = (
+    ("deepseek-v4-flash", "DeepSeek V4 Flash"),
+    ("deepseek-v4-pro", "DeepSeek V4 Pro"),
+    ("deepseek-chat", "deepseek-chat（兼容）"),
 )
 
 
@@ -69,9 +79,8 @@ class MainWindow(QMainWindow):
         # QMainWindow 必须先初始化，才能使用 setCentralWidget 等 API
         super().__init__()
         # 窗口标题栏显示的字符串（操作系统任务栏、窗口左上角可见）
-        self.setWindowTitle("AI 编程教练（骨架）")
-        # 初始客户区宽高（像素）；用户仍可拖拽边缘改变大小，内部布局会随之伸缩
-        self.resize(960, 640)
+        self.setWindowTitle("AI 编程教练")
+        self.resize(1200, 720)
 
         # ────────── 栈容器：所有「整页」界面都放在这里面 ──────────
         self._stack = QStackedWidget()
@@ -79,6 +88,24 @@ class MainWindow(QMainWindow):
         # ────────── 第 0 页：主页（选版本）──────────
         home = QWidget()  # 无独立窗口边框，仅作为一页内容的根控件
         home_layout = QVBoxLayout(home)  # 把垂直布局绑定到 home：子控件自上而下排列
+
+        api_row = QHBoxLayout()
+        api_row.addWidget(QLabel("模型 / API Key"))
+        self._model_combo = QComboBox()
+        for model_id, label in MODEL_OPTIONS:
+            self._model_combo.addItem(label, model_id)
+        api_row.addWidget(self._model_combo)
+        self._api_key_input = QLineEdit()
+        self._api_key_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self._api_key_input.setPlaceholderText(
+            "未填写时使用环境变量 DEEPSEEK_API_KEY；均未配置则返回占位回复"
+        )
+        api_row.addWidget(self._api_key_input, stretch=1)
+        save_api_btn = QPushButton("保存")
+        save_api_btn.clicked.connect(self._save_api_settings)
+        api_row.addWidget(save_api_btn)
+        home_layout.addLayout(api_row)
+
         home_layout.addWidget(QLabel("选择题目版本"))  # 顶部提示文字；QLabel 默认不接收点击
         row = QHBoxLayout()  # 下一行将容纳四个并排按钮；此时还未 attach 到 home
 
@@ -114,14 +141,42 @@ class MainWindow(QMainWindow):
 
         # 把整个栈交给主窗口中央区域；此后可见内容完全由 _stack 当前页决定
         self.setCentralWidget(self._stack)
+        self._apply_api_settings_from_disk()
+
+    def _model_id_from_combo(self) -> str:
+        model_id = self._model_combo.currentData()
+        if isinstance(model_id, str) and model_id.strip():
+            return model_id.strip()
+        return data_manager.DEFAULT_APP_MODEL
+
+    def _set_model_combo(self, model_id: str) -> None:
+        target = model_id.strip() or data_manager.DEFAULT_APP_MODEL
+        for index in range(self._model_combo.count()):
+            if self._model_combo.itemData(index) == target:
+                self._model_combo.setCurrentIndex(index)
+                return
+        self._model_combo.setCurrentIndex(0)
+
+    def _apply_api_settings_from_disk(self) -> None:
+        settings = data_manager.load_app_settings()
+        self._set_model_combo(settings["model"])
+        self._api_key_input.setText(settings["api_key"])
+        ai_coach.set_runtime_config(settings["api_key"], settings["model"])
+
+    def _save_api_settings(self) -> None:
+        model = self._model_id_from_combo()
+        api_key = self._api_key_input.text().strip()
+        data_manager.save_app_settings({"api_key": api_key, "model": model})
+        ai_coach.set_runtime_config(api_key, model)
+        QMessageBox.information(self, "已保存", "API 配置已保存到本机。")
 
     def _refresh_home_progress_labels(self) -> None:
         """主页按钮展示「已勾选 / 左侧全部复选框」计数（见 sections_loader）。"""
-        data = data_manager.load_user_data()
         for vid, btn in self._home_version_buttons:
             label = next(l for v, l in VERSION_ENTRIES if v == vid)
+            state = data_manager.load_version_state(vid)
             den = sections_loader.progress_denominator(vid)
-            num = sections_loader.progress_numerator(data, vid)
+            num = sections_loader.progress_numerator(state, vid)
             btn.setText(f"{label}  [{num}/{den}]")
 
     def _open_version(self, version_id: str) -> None:

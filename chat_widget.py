@@ -1,15 +1,17 @@
 """
-AI 教练 Tab：只读历史区 + 多行输入框 + 发送；读写 user_data.json。
+AI 教练 Tab：只读历史区 + 多行输入框 + 发送；读写 data/versionN/history/*.json。
 """
 
 # 推迟解析类型注解，便于在类型里引用尚未定义的类名（与本项目其它文件一致）
 from __future__ import annotations
 
-from html import escape as html_escape  # HTML 转义，防止用户正文破坏富文本结构
-from typing import Any  # JSON 消息结构灵活，用 Any 标注
+from collections.abc import Callable
 
-from PyQt6.QtCore import Qt, pyqtSignal  # Qt 枚举与信号
-from PyQt6.QtGui import QKeyEvent, QPalette, QTextCursor  # 键盘事件、调色板、文档光标
+from html import escape as html_escape
+from typing import Any
+
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QKeyEvent, QPalette, QTextCursor
 from PyQt6.QtWidgets import (  # 本文件用到的界面类
     QHBoxLayout,  # 水平布局
     QLabel,  # 静态文字
@@ -21,8 +23,8 @@ from PyQt6.QtWidgets import (  # 本文件用到的界面类
 )
 
 import ai_coach  # 调用大模型/占位回复
-import data_manager  # 读写 user_data.json
-import sections_loader  # 当前叶子标题与导读引导
+import data_manager
+import sections_loader
 
 
 class ComposerTextEdit(QTextEdit):
@@ -62,10 +64,19 @@ class ChatWidget(QWidget):
       以后要优化可改为线程/QTimer/worker，但那是架构升级，本文件保持简单直观。
     """
 
-    def __init__(self, version_id: str, task_id: str, parent: QWidget | None = None) -> None:
-        super().__init__(parent)  # 初始化 QWidget
-        self._version_id = version_id  # 当前题目版本，与 prompts/数据键一致
-        self._task_id = task_id  # 当前任务 id，与 user_data 嵌套键一致
+    def __init__(
+        self,
+        version_id: str,
+        task_id: str,
+        program_loader: Callable[[], str] | None = None,
+        parent: QWidget | None = None,
+    ) -> None:
+        super().__init__(parent)
+        self._version_id = version_id
+        self._task_id = task_id
+        self._program_loader = program_loader or (
+            lambda: data_manager.load_version_code(version_id)
+        )
 
         # ---------- 上方：对话记录 ----------
         self._history_view = QTextEdit()  # 只读区，展示历史气泡
@@ -105,8 +116,23 @@ class ChatWidget(QWidget):
         layout.addLayout(row)  # 底：输入行
 
         self._update_ctx_label()
-        self.load_history()  # 进入时从磁盘恢复本任务历史
-        self._bootstrap_planning_if_needed()  # 功能设计：空历史自动一轮导读
+        self.load_history()
+        self._bootstrap_if_needed()
+
+    def _debug_task_id(self) -> str | None:
+        spec = sections_loader.get_version_spec(self._version_id)
+        tid = spec.get("debug_task_id")
+        return str(tid) if tid else None
+
+    def _is_debug_task(self) -> bool:
+        dt = self._debug_task_id()
+        return bool(dt and self._task_id == dt)
+
+    def _bootstrap_if_needed(self) -> None:
+        if self._is_debug_task():
+            self._bootstrap_debug_if_needed()
+        else:
+            self._bootstrap_planning_if_needed()
 
     def _update_ctx_label(self) -> None:
         sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
@@ -115,22 +141,57 @@ class ChatWidget(QWidget):
         self._ctx_label.setText(f"AI 教练 · {self._version_id} / {self._task_id}{suffix}")
 
     def _bootstrap_planning_if_needed(self) -> None:
-        """Planning leaf with empty history: one assistant turn (and trigger user line for API)."""
         sec = sections_loader.get_leaf_section(self._version_id, self._task_id)
         if not sec or sec.get("role") != "planning":
             return
-        data = data_manager.load_user_data()
-        slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)
-        hist: list[dict[str, Any]] = list(slot.get("coach_history") or [])
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
         if hist:
             return
         trigger = "请开始本节导读讲解。"
         reply = ai_coach.chat(self._version_id, self._task_id, [], trigger)
-        slot["coach_history"] = [
-            {"role": "user", "content": trigger},
-            {"role": "assistant", "content": reply},
-        ]
-        data_manager.save_user_data(data)
+        data_manager.save_task_history(
+            self._version_id,
+            self._task_id,
+            [
+                {"role": "user", "content": trigger},
+                {"role": "assistant", "content": reply},
+            ],
+        )
+        self.load_history()
+
+    def _bootstrap_debug_if_needed(self) -> None:
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        if hist:
+            return
+        samples = data_manager.load_version_samples(self._version_id)
+        if not samples:
+            intro = "（暂无样例，请在 data/versionN/samples.json 中配置。）"
+            data_manager.save_task_history(
+                self._version_id,
+                self._task_id,
+                [{"role": "assistant", "content": intro}],
+            )
+            self.load_history()
+            return
+        state = data_manager.load_version_state(self._version_id)
+        data_manager.ensure_task_state(state, self._task_id)
+        state[self._task_id]["current_sample_index"] = 0
+        data_manager.save_version_state(self._version_id, state)
+        lines = ["所有编码节已完成，现在开始调试。"]
+        if not sections_loader.all_coding_leaves_completed(
+            state, self._version_id
+        ):
+            lines.append("提示：建议先完成左侧各编码小节的勾选后再系统调试。")
+        lines.append(
+            "请在本地用中列完整程序运行，并将**完整**程序输出粘贴回对话框。"
+        )
+        lines.append(f"这是第 1 条样例输入：\n{samples[0].get('input', '')}")
+        intro = "\n".join(lines)
+        data_manager.save_task_history(
+            self._version_id,
+            self._task_id,
+            [{"role": "assistant", "content": intro}],
+        )
         self.load_history()
 
     def set_task(self, task_id: str) -> None:
@@ -140,45 +201,33 @@ class ChatWidget(QWidget):
         """
         self._task_id = task_id  # 更新当前任务
         self._update_ctx_label()
-        self.load_history()  # 重载该任务的 coach_history 到界面
-        self._bootstrap_planning_if_needed()
+        self.load_history()
+        self._bootstrap_if_needed()
 
     def load_history(self) -> None:
-        """
-        根据 self._version_id + self._task_id 从 user_data.json 读出 coach_history，刷新文本框。
-        ensure_task_slot：
-          若 JSON 里缺少对应版本/任务的嵌套字典，会在传入的 data 上就地创建键。
-          此处「只读展示」仍会触发补键，但若最后没有 save_user_data，这些补键仅存在于本次内存里的 data，
-          不会写盘——除非后续某操作 save 了同一份 data。
-        """
-        data = data_manager.load_user_data()  # 整份用户 JSON 读入内存
-        slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)  # 取/建当前任务槽
-        hist = slot.get("coach_history") or []  # 无键或 None 时当空列表
-
-        self._history_view.clear()  # 先清空文档，避免重复追加
-        for m in hist:  # 逐条渲染历史
-            role = m.get("role", "")  # user / assistant 等
-            content = m.get("content", "")  # 正文
-            self._insert_history_html(role, content)  # 插入一条气泡 HTML
-
-        self._scroll_history_to_bottom()  # 滚到最新
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        self._history_view.clear()
+        for m in hist:
+            role = m.get("role", "")
+            content = m.get("content", "")
+            self._insert_history_html(role, content)
+        self._scroll_history_to_bottom()
 
     def clear(self) -> None:
-        """
-        清空当前版本+任务在磁盘中的 coach_history，并清空界面。
-        若仅需清屏不关磁盘，应另写方法或手动操作数据结构；当前 API 是「彻底清空持久化」。
-        """
-        data = data_manager.load_user_data()  # 读当前磁盘状态
-        slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)  # 定位任务槽
-        slot["coach_history"] = []  # 历史列表置空
-        data_manager.save_user_data(data)  # 写回 user_data.json
-        self._history_view.clear()  # 同步清空只读区显示
+        data_manager.clear_task_history(self._version_id, self._task_id)
+        if self._is_debug_task():
+            state = data_manager.load_version_state(self._version_id)
+            slot = data_manager.ensure_task_state(state, self._task_id)
+            slot["current_sample_index"] = 0
+            data_manager.save_version_state(self._version_id, state)
+        self._history_view.clear()
+        self._bootstrap_if_needed()
 
     def _on_clear_clicked(self) -> None:
         ok = QMessageBox.question(
             self,
             "清空聊天记录",
-            "确定清空当前版本与任务下的教练对话吗？将同步删除本地 data/user_data.json 中对应 coach_history，且不可恢复。",
+            "确定清空当前版本与任务下的教练对话吗？将同步删除本地 history 中对应记录，且不可恢复。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -277,39 +326,66 @@ class ChatWidget(QWidget):
         bar.setValue(bar.maximum())  # 滚到最底
 
     def _on_send(self) -> None:
-        """
-        发送一轮对话：校验输入 → 持久化用户句 → 调 AI → 持久化助手句。
-
-        顺序要点：
-          先把用户消息追加到界面与列表 hist，再调用 ai_coach.chat(..., hist[:-1], text)，
-          这样 API 收到的是「之前的消息」加单独的本轮用户句，而不是重复包含本轮 user 的列表。
-        """
-        text = self._input.toPlainText().strip()  # 取输入纯文本并去首尾空白
-        if not text:  # 空串不发
+        text = self._input.toPlainText().strip()
+        if not text:
             return
-
-        self._input.clear()  # 输入框清空，准备下一轮
-
-        data = data_manager.load_user_data()  # 读最新持久化
-        slot = data_manager.ensure_task_slot(data, self._version_id, self._task_id)  # 当前任务槽
-        hist: list[dict[str, Any]] = list(slot.get("coach_history") or [])  # 拷贝一份列表再改
-
-        self.append_message("user", text)  # 界面先显示用户消息
-        hist.append({"role": "user", "content": text})  # 内存列表追加用户句
-
+        self._input.clear()
+        if self._is_debug_task():
+            self._on_send_debug(text)
+            return
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        self.append_message("user", text)
+        hist.append({"role": "user", "content": text})
         try:
-            # ai_coach.chat：同步请求模型（或占位回复）；可能因网络、密钥、超时等抛异常，故包在 try 里。
             reply = ai_coach.chat(
-                self._version_id,  # 选用 prompts 与上下文里的哪个「题目版本」
-                self._task_id,  # 当前左侧任务 id，供组装系统提示或日志
-                hist[:-1],  # 仅含「本轮发送之前」的对话；上面已 append 本轮 user，[:-1] 去掉重复的那条
-                text,  # 本轮用户输入原文，作为本轮 user_message，与 hist[:-1] 配合避免重复
+                self._version_id,
+                self._task_id,
+                hist[:-1],
+                text,
             )
-        except Exception as exc:  # 未在 ai_coach 内消化的异常
-            reply = f"[错误] {exc}"  # 降级为字符串回复
-            QMessageBox.warning(self, "教练请求失败", str(exc))  # 弹框提示
+        except Exception as exc:
+            reply = f"[错误] {exc}"
+            QMessageBox.warning(self, "教练请求失败", str(exc))
+        self.append_message("assistant", reply)
+        hist.append({"role": "assistant", "content": reply})
+        data_manager.save_task_history(self._version_id, self._task_id, hist)
 
-        self.append_message("assistant", reply)  # 显示助手回复
-        hist.append({"role": "assistant", "content": reply})  # 持久化列表追加助手句
-        slot["coach_history"] = hist  # 写回任务槽
-        data_manager.save_user_data(data)  # 保存到 user_data.json
+    def _on_send_debug(self, text: str) -> None:
+        samples = data_manager.load_version_samples(self._version_id)
+        state = data_manager.load_version_state(self._version_id)
+        slot = data_manager.ensure_task_state(state, self._task_id)
+        index = int(slot.get("current_sample_index", 0))
+        hist = data_manager.load_task_history(self._version_id, self._task_id)
+        self.append_message("user", text)
+        hist.append({"role": "user", "content": text})
+        if index >= len(samples):
+            reply = "所有样例已测试完成。若尚未勾选左侧 Debug，请手动勾选。"
+            self.append_message("assistant", reply)
+            hist.append({"role": "assistant", "content": reply})
+            data_manager.save_task_history(self._version_id, self._task_id, hist)
+            return
+        sample = samples[index]
+        expected = data_manager.normalize_program_output(
+            str(sample.get("output", ""))
+        )
+        actual = data_manager.normalize_program_output(text)
+        if actual == expected:
+            n = index + 1
+            reply = f"样例 {n} 通过。"
+            slot["current_sample_index"] = index + 1
+            data_manager.save_version_state(self._version_id, state)
+            if index + 1 < len(samples):
+                nxt = index + 2
+                reply += f"\n下面是第 {nxt} 条样例输入：\n{samples[index + 1].get('input', '')}"
+            else:
+                reply += (
+                    "\n所有样例已通过。请在左侧手动勾选 Debug 复选框标记完成。"
+                )
+        else:
+            program = self._program_loader()
+            reply = ai_coach.analyze_debug_mismatch(
+                self._version_id, sample, text, program
+            )
+        self.append_message("assistant", reply)
+        hist.append({"role": "assistant", "content": reply})
+        data_manager.save_task_history(self._version_id, self._task_id, hist)

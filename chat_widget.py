@@ -1,5 +1,5 @@
 """
-AI 教练 Tab：只读历史区 + 多行输入框 + 发送；读写 data/versionN/history/*.json。
+AI 教练 Tab：滚动对话区（每条消息为独立气泡控件）+ 多行输入框 + 发送；读写 data/versionN/history/*.json。
 """
 
 # 推迟解析类型注解，便于在类型里引用尚未定义的类名（与本项目其它文件一致）
@@ -7,18 +7,19 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Callable
-
-from html import escape as html_escape
 from typing import Any
 
 from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeyEvent, QPalette, QTextCursor
+from PyQt6.QtGui import QKeyEvent, QPalette
 from PyQt6.QtWidgets import (  # 本文件用到的界面类
+    QFrame,
     QHBoxLayout,  # 水平布局
     QLabel,  # 静态文字
     QMessageBox,  # 模态消息框
     QPushButton,  # 可点击按钮
-    QTextEdit,  # 多行富文本编辑/只读
+    QScrollArea,
+    QSizePolicy,
+    QTextEdit,  # 多行富文本编辑/只读（仅输入框）
     QVBoxLayout,  # 垂直布局
     QWidget,  # 所有控件的基类
 )
@@ -194,15 +195,25 @@ class ChatWidget(QWidget):
         self._intro_bootstrap_thread: IntroBootstrapThread | None = None
         self._chat_send_thread: CoachChatThread | None = None
 
-        # ---------- 上方：对话记录 ----------
-        self._history_view = QTextEdit()  # 只读区，展示历史气泡
-        self._history_view.setReadOnly(True)  # 禁止用户直接改历史文本
-        self._history_view.setLineWrapMode(QTextEdit.LineWrapMode.WidgetWidth)  # 历史按宽度换行
-        self._history_view.setAutoFillBackground(True)  # 用调色板铺背景，避免露底
-        _hp = self._history_view.palette()  # 取历史区当前调色板副本
-        _hp.setColor(QPalette.ColorRole.Base, self.palette().color(QPalette.ColorRole.Window))  # 背景与窗口色一致
-        _hp.setColor(QPalette.ColorRole.Text, self.palette().color(QPalette.ColorRole.WindowText))  # 前景与窗口文字色一致
-        self._history_view.setPalette(_hp)  # 应用调色板，深色主题下不刺眼
+        # ---------- 上方：对话记录（每条消息独立控件，避免 QTextEdit.insertHtml 表格与 Markdown 冲突）----------
+        self._history_scroll = QScrollArea()
+        self._history_scroll.setWidgetResizable(True)
+        self._history_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._history_scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        self._history_container = QWidget()
+        self._history_layout = QVBoxLayout(self._history_container)
+        self._history_layout.setContentsMargins(4, 4, 4, 8)
+        self._history_layout.setSpacing(10)
+        self._history_scroll.setWidget(self._history_container)
+        _hp2 = self._history_container.palette()
+        _hp2.setColor(
+            QPalette.ColorRole.Window,
+            self.palette().color(QPalette.ColorRole.Window),
+        )
+        self._history_container.setAutoFillBackground(True)
+        self._history_container.setPalette(_hp2)
 
         # ---------- 下方：输入 + 发送 ----------
         self._input = ComposerTextEdit()  # 多行输入框
@@ -228,12 +239,125 @@ class ChatWidget(QWidget):
         layout = QVBoxLayout(self)  # 本控件根布局
         self._ctx_label = QLabel("")  # 版本 / 任务 / 小节标题
         layout.addWidget(self._ctx_label)  # 标题行
-        layout.addWidget(self._history_view)  # 中间：历史
+        layout.addWidget(self._history_scroll, stretch=1)  # 中间：历史
         layout.addLayout(row)  # 底：输入行
 
         self._update_ctx_label()
         self.load_history()
         QTimer.singleShot(0, self._bootstrap_if_needed)
+        QTimer.singleShot(0, self._refresh_message_bubble_max_widths)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._refresh_message_bubble_max_widths()
+
+    def _refresh_message_bubble_max_widths(self) -> None:
+        vp = self._history_scroll.viewport().width()
+        mx = max(220, int((vp - 56) * 0.82))
+        # 与 inner 左右 contentsMargins 14+14 一致，供 QLabel 换行高度计算（否则 Markdown 会算出巨大 height）
+        inner_text_w = max(50, mx - 28)
+        for i in range(self._history_layout.count()):
+            it = self._history_layout.itemAt(i)
+            if it is None:
+                continue
+            w = it.widget()
+            if w is None:
+                continue
+            bubble = getattr(w, "_bubble_frame", None)
+            if bubble is not None:
+                bubble.setMaximumWidth(mx)
+            body = getattr(w, "_body_label", None)
+            if body is not None:
+                body.setFixedWidth(inner_text_w)
+            cap = getattr(w, "_cap_label", None)
+            if cap is not None:
+                cap.setFixedWidth(inner_text_w)
+
+    def _clear_history_rows(self) -> None:
+        while self._history_layout.count():
+            item = self._history_layout.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+
+    def _make_message_row_widget(self, role: str, content: str) -> QWidget:
+        row = QWidget()
+        row.setSizePolicy(
+            QSizePolicy.Policy.Expanding,
+            QSizePolicy.Policy.Minimum,
+        )
+        outer = QHBoxLayout(row)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(8)
+
+        bubble = QFrame()
+        bubble.setObjectName("bubble")
+        bubble.setFrameShape(QFrame.Shape.NoFrame)
+        bubble.setSizePolicy(
+            QSizePolicy.Policy.Maximum,
+            QSizePolicy.Policy.Minimum,
+        )
+        inner = QVBoxLayout(bubble)
+        inner.setContentsMargins(14, 10, 14, 10)
+        inner.setSpacing(6)
+
+        cap = QLabel(self._role_caption(role))
+        cap.setWordWrap(True)
+        cap.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
+        body = QLabel()
+        body.setWordWrap(True)
+        body.setSizePolicy(
+            QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Minimum,
+        )
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+            | Qt.TextInteractionFlag.TextSelectableByKeyboard
+        )
+
+        if role == "user":
+            cap.setStyleSheet("color: #8ecae6; font-size: 11px;")
+            body.setTextFormat(Qt.TextFormat.PlainText)
+            body.setText(content or "")
+            body.setStyleSheet("color: #ececec;")
+            bubble.setStyleSheet(
+                "QFrame#bubble { background-color: #1e4d6e; border-radius: 14px; }"
+            )
+            av = QLabel("👤")
+            av.setFixedWidth(40)
+            av.setAlignment(
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+            )
+            av.setStyleSheet("font-size: 17px; padding-top: 2px;")
+            outer.addStretch(1)
+            outer.addWidget(bubble, 0, Qt.AlignmentFlag.AlignTop)
+            outer.addWidget(av, 0, Qt.AlignmentFlag.AlignTop)
+        else:
+            cap.setStyleSheet("color: #c5cdd8; font-size: 11px;")
+            body.setTextFormat(Qt.TextFormat.MarkdownText)
+            body.setText(content or "")
+            body.setStyleSheet("color: #ececec;")
+            bubble.setStyleSheet(
+                "QFrame#bubble { background-color: #3d4450; border-radius: 14px; }"
+            )
+            av = QLabel("🤖")
+            av.setFixedWidth(40)
+            av.setAlignment(
+                Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter
+            )
+            av.setStyleSheet("font-size: 17px; padding-top: 2px;")
+            outer.addWidget(av, 0, Qt.AlignmentFlag.AlignTop)
+            outer.addWidget(bubble, 0, Qt.AlignmentFlag.AlignTop)
+            outer.addStretch(1)
+
+        inner.addWidget(cap)
+        inner.addWidget(body)
+        row._bubble_frame = bubble  # type: ignore[attr-defined]
+        row._body_label = body  # type: ignore[attr-defined]
+        row._cap_label = cap  # type: ignore[attr-defined]
+        return row
 
     def _debug_task_id(self) -> str | None:
         spec = sections_loader.get_version_spec(self._version_id)
@@ -522,12 +646,14 @@ class ChatWidget(QWidget):
 
     def load_history(self) -> None:
         hist = data_manager.load_task_history(self._version_id, self._task_id)
-        self._history_view.clear()
+        self._clear_history_rows()
         for m in hist:
-            role = m.get("role", "")
-            content = m.get("content", "")
-            self._insert_history_html(role, content)
+            role = str(m.get("role", ""))
+            content = str(m.get("content", ""))
+            self._history_layout.addWidget(self._make_message_row_widget(role, content))
+        self._refresh_message_bubble_max_widths()
         self._scroll_history_to_bottom()
+        QTimer.singleShot(0, self._refresh_message_bubble_max_widths)
 
     def clear(self) -> None:
         data_manager.clear_task_history(self._version_id, self._task_id)
@@ -536,7 +662,7 @@ class ChatWidget(QWidget):
             slot = data_manager.ensure_task_state(state, self._task_id)
             slot["current_sample_index"] = 0
             data_manager.save_version_state(self._version_id, state)
-        self._history_view.clear()
+        self._clear_history_rows()
         QTimer.singleShot(0, self._safe_bootstrap_after_clear)
 
     def _safe_bootstrap_after_clear(self) -> None:
@@ -562,95 +688,22 @@ class ChatWidget(QWidget):
             self.clear()  # 执行持久化清空
 
     def append_message(self, role: str, content: str) -> None:
-        """在 QTextEdit 末尾追加气泡展示；不负责写入 JSON。"""
-        self._insert_history_html(role, content)  # 插入对应角色的气泡
-        self._scroll_history_to_bottom()  # 新消息始终可见
+        """在对话区末尾追加一条气泡；不负责写入 JSON。"""
+        self._history_layout.addWidget(self._make_message_row_widget(role, content))
+        self._refresh_message_bubble_max_widths()
+        self._scroll_history_to_bottom()
+        QTimer.singleShot(0, self._refresh_message_bubble_max_widths)
 
     @staticmethod
     def _role_caption(role: str) -> str:
         return {"user": "用户", "assistant": "助手"}.get(role, role or "?")  # 界面展示用中文角色名
 
-    @staticmethod
-    def _chat_bubble_inner(caption: str, body: str, bg: str, caption_color: str) -> str:
-        """单条气泡内部 HTML（圆角块 + 小标题 + 正文）。"""
-        # 圆括号里多段引号字面值上下相邻时，Python 会拼成**一个**长字符串，中间可插 # 注释行。
-        # 下面按「开标签 / 小标题 / 正文 / 闭标签」四段写，每段上一行用 # 解释 HTML 与 style 里各关键词。
-        return (
-            # <div>：块级容器（division）。style="…"：内联 CSS，属性间用分号；双引号包住整段样式字串。
-            # padding:10px 14px：内边距；两值时=上下 10px、左右 14px，字不贴边。
-            # border-radius:14px：圆角，px=像素，数值越大角越圆。
-            # background:{bg}：背景色；{bg} 为 f-string 把参数 bg 填进 HTML，一般是 # 开头的十六进制颜色。
-            f'<div style="padding:10px 14px;border-radius:14px;background:{bg};">'
-            # 仍是一个 <div>。font-size:11px：字高 11 像素。color:{caption_color}：字色，来自参数插值。
-            # margin-bottom:6px：本块下缘与下一块（正文）之间再空 6px。{caption} 为已转义的小标题文本。末尾 </div> 结束本层。
-            f'<div style="font-size:11px;color:{caption_color};margin-bottom:6px;">{caption}</div>'
-            # white-space:pre-wrap：保留用户输入里的换行与缩进，同时仍按窗口宽度自动折行（与 pre 纯预格式化不同）。
-            # font-family:inherit：字体继承父级，与界面其它字一致。color:#ececec：写死为浅灰字色。
-            # line-height:1.45：行高为字高的 1.45 倍，多行时更易读。{body} 为已转义的正文。末尾 </div> 结束正文层。
-            f'<div style="white-space:pre-wrap;font-family:inherit;color:#ececec;line-height:1.45;">{body}</div>'
-            # "</div>"：非 f-string；只闭合最外层 <div>，与第一段开标签配对；不加 f 是因为这里没有 {变量}。
-            "</div>"
-        )
-
-    def _insert_history_html(self, role: str, content: str) -> None:
-        caption = html_escape(self._role_caption(role))  # 标题防 XSS
-        body = html_escape(content or "")  # 正文防 XSS
-
-        if role == "user":  # 用户消息：右对齐气泡
-            bg, cap_col = "#1e4d6e", "#8ecae6"  # 深蓝气泡 + 浅青标题色
-            bubble = self._chat_bubble_inner(caption, body, bg, cap_col)  # 内层 HTML
-            # 下列相邻字符串会拼成一段 HTML；# 行解释标签名与属性（名=值，布尔属性可单独出现）。
-            block = (
-                # <table>：表格根；width="100%" 相对上层容器占满宽（百分比）。
-                # cellspacing="0"：相邻单元格间隙为 0（否则默认有缝）。
-                # cellpadding="4"：格子内线与内容的内边距各约 4px。
-                '<table width="100%" cellspacing="0" cellpadding="4" '
-                # style：margin:10px 0 = 表格外上下外边距 10px、左右 0；border-collapse:collapse 合并格子边框避免双线。
-                'style="margin:10px 0;border-collapse:collapse;">'
-                # <tr>：table row，一行；本行含两个 <td> = 两列（左气泡列 | 右头像列）。
-                "<tr>"
-                # <td>：table data，一格；align="right" 格内水平靠右（气泡贴右侧）；valign="top" 垂直顶端对齐。
-                '<td align="right" valign="top">'
-                # <div style="…">：display:inline-block 使盒子宽度随内容；max-width:82% 限制不超过父宽约 82%；
-                # text-align:left 气泡内文字仍从左读（只是整块气泡在右）。
-                '<div style="display:inline-block;max-width:82%;text-align:left;">'
-                # f"{bubble}"：插入 _chat_bubble_inner；</div> 结束 div；</td> 结束左列。
-                f"{bubble}</div></td>"
-                # 第二列：width="40" 固定列宽约 40px；valign="top"；align="center" 水平居中放 emoji。
-                # font-size:17px 控制符号大小；line-height:1.2 行高相对字号；👤 为用户头像占位（Unicode）。
-                '<td width="40" valign="top" align="center" '
-                'style="font-size:17px;line-height:1.2;">👤</td>'
-                # </tr> 结束行；</table> 结束表。
-                "</tr></table>"
-            )
-        else:  # 助手或其它角色：左对齐气泡
-            bg, cap_col = "#3d4450", "#c5cdd8"  # 灰气泡 + 浅灰标题
-            bubble = self._chat_bubble_inner(caption, body, bg, cap_col)
-            # 与用户分支同一套 <table>/<tr>，仅两列顺序对调：先窄头像列，再气泡列（常见「对方消息在左」）。
-            block = (
-                # 表格外壳与用户侧相同：拉满宽、格子间距、合并边框、上下外边距。
-                '<table width="100%" cellspacing="0" cellpadding="4" '
-                'style="margin:10px 0;border-collapse:collapse;">'
-                "<tr>"
-                # 第一列：窄列放助手头像；width="40"、居中、顶对齐；emoji 🤖 占位。
-                '<td width="40" valign="top" align="center" '
-                'style="font-size:17px;line-height:1.2;">🤖</td>'
-                # 第二列：仅 valign="top"（文本默认左对齐），内层 div 同样限制 max-width:82%。
-                '<td valign="top">'
-                '<div style="display:inline-block;max-width:82%;text-align:left;">'
-                f"{bubble}</div></td>"
-                "</tr></table>"
-            )
-
-        cursor = self._history_view.textCursor()  # 取文档光标
-        cursor.movePosition(QTextCursor.MoveOperation.End)  # 移到文末再插
-        cursor.insertHtml(block)  # 插入富文本片段
-        # 连续 insertHtml 时 Qt 可能把相邻气泡接到同一行，插入新段落保证每条消息后换行
-        cursor.insertBlock()  # 新段落，分隔两条消息
-
     def _scroll_history_to_bottom(self) -> None:
-        bar = self._history_view.verticalScrollBar()  # 历史区竖直滚动条
-        bar.setValue(bar.maximum())  # 滚到最底
+        def _go() -> None:
+            bar = self._history_scroll.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
+        QTimer.singleShot(0, _go)
 
     def _on_send(self) -> None:
         text = self._input.toPlainText().strip()

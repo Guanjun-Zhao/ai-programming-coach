@@ -16,9 +16,9 @@
 
 ## 3.2　事件驱动：`CEvent` 与 `CKingdom`
 
-### 3.2.1　`CEvent` 类
+### 3.2.1　`CEvent` 类的声明
 
-所有发生的事情都被包装成一个 `CEvent` 对象，暂存在 `CKingdom` 的 `vEvent` 向量里，最后统一排序输出：
+所有发生的事情都被包装成一个 `CEvent` 对象，暂存在 `CKingdom` 的 `vEvent` 向量里，最后统一排序输出。先来写好 `CEvent` 的成员变量和函数声明：
 
 ```cpp
 // warcraft3.cpp
@@ -39,20 +39,9 @@ public:
     CEvent(EEventType eEventType_, int nTime_, int nCityNo_,
            int nColor_, const string & s) :
         eEventType(eEventType_), nTime(nTime_),
-        nCityNo(nCityNo_), nColor(nColor_), sDescribe(s) {}
-
-    void Output()
-    {
-        char szTime[20];
-        sprintf(szTime, "%03d:%02d", nTime / 60, nTime % 60);   // ③
-        cout << szTime << " " << sDescribe << endl;
-    }
-    bool operator<(const CEvent & e2) const {     // ④
-        if (nTime != e2.nTime)   return nTime < e2.nTime;
-        if (nCityNo != e2.nCityNo) return nCityNo < e2.nCityNo;
-        if (eEventType != e2.eEventType) return eEventType < e2.eEventType;
-        return nColor < e2.nColor;
-    }
+        nCityNo(nCityNo_), nColor(nColor_), sDescribe(s) {}   // ③
+    void Output();
+    bool operator<(const CEvent & e2) const;
 };
 ```
 
@@ -60,13 +49,52 @@ public:
 
 在②处，每条事件记录保存了五个字段：事件类型、发生时间（分钟数）、发生城市、所属阵营，以及描述字符串。
 
-在③处，`Output()` 把分钟数拆成小时和分钟，用 `%03d:%02d` 格式化输出。
+在③处，构造函数只有**成员初始化列表**，函数体为空 `{}`。C++ 推荐用初始化列表而非函数体内赋值来初始化成员——前者在成员被创建时直接初始化，不会多做一次默认构造。`Output()` 和 `operator<` 只写了声明，函数体在下面两节分别补上。
 
-在④处，`operator<` 定义了排序规则：先按时间、再按城市（从西到东）、再按事件类型、最后按阵营（红=0 排在 蓝=1 之前）。
+### 3.2.2　格式化输出：`Output()`
 
-### 3.2.2　`CKingdom` 类
+`Output()` 负责把一条事件记录打印出来，并按题目格式把分钟数转成"时:分"：
 
-`CKingdom` 是整个模拟的驱动核心，它持有两个司令部，按分钟逐步推进时间：
+```cpp
+// warcraft3.cpp
+--snip--
+void CEvent::Output()
+{
+    char szTime[20];
+    sprintf(szTime, "%03d:%02d", nTime / 60, nTime % 60);   // ①
+    cout << szTime << " " << sDescribe << endl;
+}
+```
+
+在①处，把内部存储的分钟数拆成小时（整除 60）和剩余分钟（取模 60），用 `%03d:%02d` 格式化后拼入输出字符串。
+
+### 3.2.3　排序规则：`operator<`
+
+`operator<` 定义了两条事件比较大小的规则，`sort` 函数依赖它来排序：
+
+```cpp
+// warcraft3.cpp
+--snip--
+bool CEvent::operator<(const CEvent & e2) const
+{
+    if (nTime != e2.nTime)           return nTime < e2.nTime;           // ①
+    if (nCityNo != e2.nCityNo)       return nCityNo < e2.nCityNo;       // ②
+    if (eEventType != e2.eEventType) return eEventType < e2.eEventType; // ③
+    return nColor < e2.nColor;                                           // ④
+}
+```
+
+在①处，最优先按时间排——早发生的排前面。
+
+在②处，同一时刻按城市编号从小到大（即从西到东）排。
+
+在③处，同城同时的事件按类型排——这正是 `EEventType` 枚举声明顺序的意义：`EVENT_LION_RUN` 的值比 `EVENT_MARCH` 小，所以 lion 逃跑先于行军打印。
+
+在④处，最后按阵营排，红方（0）排在蓝方（1）之前。
+
+### 3.2.4　`CKingdom` 类的声明
+
+`CKingdom` 是整个模拟的驱动核心，它持有两个司令部，按分钟逐步推进时间。先来写好它的成员变量和函数声明：
 
 ```cpp
 // warcraft3.cpp
@@ -81,34 +109,12 @@ private:
     int nEndTime;
     int nCityNum;
 public:
-    CKingdom(int nCityNum_, int nInitMoney) :
-        nTimeInMinutes(0),
-        Red(COLOR_RED, nInitMoney, 0),
-        Blue(COLOR_BLUE, nInitMoney, nCityNum_ + 1),   // ③
-        nCityNum(nCityNum_)
-    {
-        Red.SetKingdom(this);   Red.SetEnemy(&Blue);
-        Blue.SetKingdom(this);  Blue.SetEnemy(&Red);
-        nEndTime = 3000000;
-    }
-    void Run(int T) {
-        for (int t = 0; t <= T; t++)
-            if (TimePass(t) == 0) return;   // ④
-    }
-    int TimePass(int nMinutes);    // ⑤
-    void OutputResult() {
-        sort(vEvent.begin(), vEvent.end());   // ⑥
-        for (int i = 0; i < vEvent.size(); i++)
-            vEvent[i].Output();
-    }
-    void AddEvent(EEventType eType, int nCityNo,
-                  int nColor, const string & s) {
-        CEvent tmp(eType, nTimeInMinutes, nCityNo, nColor, s);
-        vEvent.push_back(tmp);
-    }
-    void WarEnd() {
-        if (nEndTime == 3000000) nEndTime = nTimeInMinutes;   // ⑦
-    }
+    CKingdom(int nCityNum_, int nInitMoney);
+    void Run(int T);
+    int  TimePass(int nMinutes);         // ③
+    void OutputResult();
+    void AddEvent(EEventType eType, int nCityNo, int nColor, const string & s);
+    void WarEnd();
 };
 ```
 
@@ -116,17 +122,71 @@ public:
 
 在②处，`vEvent` 向量负责收集所有事件；整个模拟过程中，所有 `AddEvent()` 调用都把事件追加到这里，直到最后再排序。
 
-在③处，构造函数使用初始化列表：红方司令部的城市编号为 0，蓝方为 `nCityNum + 1`，分别位于世界的两端。
+在③处，`public` 区域只列出成员函数的**声明**——每个函数的具体实现依次在下面几节展开。`TimePass` 是最关键的方法，负责按分钟调度所有动作，单独用一节讲解。
 
-在④处，`Run(T)` 从第 0 分钟逐分钟推进到第 T 分钟，只要 `TimePass` 返回 0（战争结束），就立即停止。
+### 3.2.5　`CKingdom` 构造函数
 
-在⑤处，`TimePass` 用 `switch(nMinutes % 60)` 在每小时的固定分钟触发对应的事件，下一节展开。
+构造函数负责初始化两个司令部并建立它们之间的连接：
 
-在⑥处，`OutputResult()` 利用 `operator<` 对 `vEvent` 排序后逐条输出——所有事件按正确顺序一次性打印。
+```cpp
+// warcraft3.cpp
+--snip--
+CKingdom::CKingdom(int nCityNum_, int nInitMoney) :
+    nTimeInMinutes(0),
+    Red(COLOR_RED,  nInitMoney, 0),
+    Blue(COLOR_BLUE, nInitMoney, nCityNum_ + 1),   // ①
+    nCityNum(nCityNum_)
+{
+    Red.SetKingdom(this);   Red.SetEnemy(&Blue);
+    Blue.SetKingdom(this);  Blue.SetEnemy(&Red);   // ②
+    nEndTime = 3000000;
+}
+```
 
-在⑦处，`WarEnd()` 只记录第一次战争结束的时间；`TimePass` 在推进到超过 `nEndTime` 的时刻时会返回 0，终止循环。
+在①处，红方司令部城市编号为 0，蓝方为 `nCityNum + 1`，分别位于世界的两端。
 
-下面来实现 `TimePass`，它是整个时间轴的调度中心：
+在②处，函数体里让两个司令部相互认识：每个司令部都持有指向 `CKingdom` 的指针（用于调用 `AddEvent`）和指向对方的指针（用于查询敌情）。两个调用完成后，整个模拟世界才真正"连通"。
+
+### 3.2.6　`Run()`、`OutputResult()` 等辅助方法
+
+下面来实现 `CKingdom` 的其余四个辅助方法，它们各司其职，共同构成模拟的外层框架：
+
+```cpp
+// warcraft3.cpp
+--snip--
+void CKingdom::Run(int T) {
+    for (int t = 0; t <= T; t++)
+        if (TimePass(t) == 0) return;   // ①
+}
+
+void CKingdom::OutputResult() {
+    sort(vEvent.begin(), vEvent.end());   // ②
+    for (int i = 0; i < vEvent.size(); i++)
+        vEvent[i].Output();
+}
+
+void CKingdom::AddEvent(EEventType eType, int nCityNo,
+                        int nColor, const string & s) {
+    CEvent tmp(eType, nTimeInMinutes, nCityNo, nColor, s);
+    vEvent.push_back(tmp);   // ③
+}
+
+void CKingdom::WarEnd() {
+    if (nEndTime == 3000000) nEndTime = nTimeInMinutes;   // ④
+}
+```
+
+在①处，`Run(T)` 从第 0 分钟逐分钟推进到第 T 分钟，只要 `TimePass` 返回 0（战争结束），就立即停止。
+
+在②处，`OutputResult()` 利用 `operator<` 对 `vEvent` 排序后逐条输出——所有事件在这一刻才真正打印，这就是事件驱动架构的核心：**先收集，后排序，再输出**。
+
+在③处，`AddEvent()` 是一个转发函数：它把调用方提供的参数和当前时间打包成 `CEvent` 对象，追加到 `vEvent` 末尾。所有模块通过这个方法添加事件，而不是直接操作 `vEvent`。
+
+在④处，`WarEnd()` 只记录**第一次**战争结束的时间——用 `3000000` 作为"尚未结束"的哨兵值，大于任何合法的模拟时间。
+
+### 3.2.7　`TimePass()`
+
+下面来实现 `TimePass()`，它是整个时间轴的调度中心：
 
 ```cpp
 // warcraft3.cpp
@@ -155,9 +215,9 @@ int CKingdom::TimePass(int nMinutes) {
 
 ## 3.3　武器的继承体系
 
-### 3.3.1　`CWeapon` 基类
+### 3.3.1　`CWeapon` 类的声明
 
-上一章的 `CWeapon` 只是一个数据容器。这一章三种武器的攻击逻辑各不相同，因此 `CWeapon` 升级为含有纯虚函数的基类：
+上一章的 `CWeapon` 只是一个数据容器。这一章三种武器的攻击逻辑各不相同，因此 `CWeapon` 升级为含有纯虚函数的基类。先来写好它的声明：
 
 ```cpp
 // warcraft3.cpp
@@ -169,31 +229,39 @@ public:
     CWarrior * master;                              // ①
     static const char * Names[WEAPON_NUM];
 
+    CWeapon(CWarrior * m) : master(m) {}
     virtual int GetForce() = 0;                     // ②
     virtual int Attack(CWarrior * pEnemy);          // ③
     static CWeapon * NewWeapon(int idx, CWarrior * master);  // ④
-    CWeapon(CWarrior * m) : master(m) {}
 };
-
-int CWeapon::Attack(CWarrior * pEnemy) {
-    pEnemy->Hurted(GetForce());
-    return 1;    // ⑤
-}
 ```
 
-在①处，每件武器持有一个指向它的拥有者（`master`）的指针——因为攻击力是拥有者当前攻击力的百分比，计算时需要回查。
+在①处，每件武器持有一个指向拥有者（`master`）的指针——因为攻击力是拥有者当前攻击力的百分比，计算时需要回查。
 
 在②处，`GetForce()` 声明为纯虚，三个子类各自给出计算公式。
 
-在③处，基类 `Attack()` 提供默认实现：调用 `GetForce()` 扣减敌人生命值，返回 1（表示"武器仍然有效，状态可能发生变化"）。
+在③处，`Attack()` 提供默认实现，下一节补上函数体。
 
 在④处，`NewWeapon()` 是一个静态工厂方法，接受编号返回对应子类指针，调用方无需关心具体类型。
 
-在⑤处，返回值有三种含义：0 表示武器已消耗完毕（删除），1 表示状态未改变，2 表示使用了但状态发生了改变——三个子类会按需覆盖这一行为。
+### 3.3.2　默认攻击行为：`Attack()`
 
-### 3.3.2　三种武器子类
+基类的 `Attack()` 给出所有武器共用的默认攻击逻辑：
 
-下面来实现 `CSWord`、`CArrow` 和 `CBomb`：
+```cpp
+// warcraft3.cpp
+--snip--
+int CWeapon::Attack(CWarrior * pEnemy) {
+    pEnemy->Hurted(GetForce());
+    return 1;   // ①
+}
+```
+
+在①处，返回值有三种含义：0 表示武器已消耗完毕（调用方应立即 `delete`），1 表示状态未改变，2 表示武器被使用但状态发生了改变——三个子类会按需覆盖这一行为。
+
+### 3.3.3　`CSWord`：剑
+
+下面来实现三种武器子类，先从最简单的 `CSWord` 开始：
 
 ```cpp
 // warcraft3.cpp
@@ -206,53 +274,71 @@ public:
     }
     CSWord(CWarrior * m) : CWeapon(m) { nKindNo = 0; }
 };
+```
 
+在①处，剑的攻击力是拥有者当前攻击力的 20%，用整数乘法 `* 2 / 10` 避免浮点误差。`CSWord` 没有任何额外状态，每次攻击都能使用，不会被消耗。
+
+### 3.3.4　`CArrow`：使用计数
+
+`CArrow`（箭）需要额外记录被使用的次数——用完两次之后就会消耗掉：
+
+```cpp
+// warcraft3.cpp
+--snip--
 class CArrow : public CWeapon
 {
     int usedTimes;
 public:
     virtual int GetForce() {
-        return master->GetForce() * 3 / 10;   // ②
+        return master->GetForce() * 3 / 10;   // ①
     }
     CArrow(CWarrior * master) : CWeapon(master), usedTimes(0) { nKindNo = 2; }
     virtual int Attack(CWarrior * pEnemy) {
         CWeapon::Attack(pEnemy);
         ++usedTimes;
-        if (usedTimes == 2) return 0;   // ③
+        if (usedTimes == 2) return 0;   // ②
         return 2;
     }
 };
+```
 
+在①处，箭的攻击力是拥有者攻击力的 30%，同样写成整数乘法 `* 3 / 10`。
+
+在②处，箭被使用两次后返回 0，调用方会 `delete` 这支箭并将指针置 `NULL`。
+
+### 3.3.5　`CBomb`：自爆伤害
+
+`CBomb`（炸弹）最为特殊——爆炸时使用者本身也会受到伤害：
+
+```cpp
+// warcraft3.cpp
+--snip--
 class CBomb : public CWeapon
 {
 public:
     virtual int GetForce() {
-        return master->GetForce() * 4 / 10;   // ④
+        return master->GetForce() * 4 / 10;   // ①
     }
     CBomb(CWarrior * master) : CWeapon(master) { nKindNo = 1; }
     virtual int Attack(CWarrior * pEnemy) {
         int force = GetForce();
         if (master->GetName().find("ninja") == string::npos)
-            master->Hurted(force / 2);   // ⑤
+            master->Hurted(force / 2);   // ②
         pEnemy->Hurted(force);
-        return 0;   // ⑥
+        return 0;   // ③
     }
 };
 ```
 
-在①处，剑的攻击力是拥有者攻击力的 20%，用整数乘法 `* 2 / 10` 避免浮点误差。
+在①处，炸弹攻击力是拥有者攻击力的 40%。
 
-在②处，箭的攻击力是 30%，同样写成 `* 3 / 10`。
+在②处，炸弹爆炸时使用者也会受到伤害（伤害值为炸弹攻击力的一半）——但 ninja 天生免疫自伤，所以先检查 `master` 的名字是否包含 `"ninja"`。
 
-在③处，箭被使用两次后返回 0，调用方会 `delete` 这支箭并将指针置 `NULL`。
-
-在④处，炸弹攻击力是 40%。
-
-在⑤处，炸弹爆炸时使用者也会受到伤害（伤害值为炸弹攻击力的一半）——但 ninja 天生免疫自伤，所以先检查 `master` 的名字是否包含 `"ninja"`。
-
-在⑥处，炸弹一次性消耗，返回 0 表示立即删除。
+在③处，炸弹一次性消耗，返回 0 表示立即删除。
 
 > **注意：** 题目明确要求"去尾取整"的除法不要用浮点数（`force * 0.3` 在不同编译器下可能得到 `14` 或 `15`），必须写整数乘法再整除：`force * 3 / 10`。
+
+### 3.3.6　工厂方法 `NewWeapon()`
 
 工厂方法 `NewWeapon()` 把三种子类的创建集中在一处：
 
@@ -274,9 +360,9 @@ CWeapon * CWeapon::NewWeapon(int idx, CWarrior * master)
 
 ## 3.4　扩展 `CWarrior`：移动与战斗
 
-### 3.4.1　新字段与 `March()`
+### 3.4.1　新字段
 
-`CWarrior` 在本章新增了位置、攻击力、武器数组等字段：
+`CWarrior` 在本章新增了位置、攻击力、武器数组等字段，并声明了 `Runaway()`、`Yell()` 等可供子类覆盖的虚函数。先来写好类的声明：
 
 ```cpp
 // warcraft3.cpp
@@ -302,27 +388,15 @@ public:
     virtual string Yell()  { return ""; }
 
     CWarrior(int nId_, int nStrength_, int nForce_, int nCityNo_,
-             CHeadquarter * pHeadquarter_) :
-        nId(nId_), nStrength(nStrength_), nForce(nForce_),
-        nCityNo(nCityNo_), pHeadquarter(pHeadquarter_), weaponIdx(0)
-    {
-        memset(weapons, 0, sizeof(weapons));   // ⑤
-    }
-    virtual ~CWarrior() {
-        for (int i = 0; i < MAX_WPS; ++i)
-            if (weapons[i]) delete weapons[i];
-    }
+             CHeadquarter * pHeadquarter_);
+    virtual ~CWarrior();
     virtual string GetName() = 0;
     virtual void March();
     void SortWeapons(bool forTaken = false);
+    int  Attack(CWarrior * pEnemy);
+    void FightBack(CWarrior * pEnemy);
+    string TakeEnemyWeapons(CWarrior * pEnemy, bool beforeFight = false);
 };
-
-void CWarrior::March()
-{
-    if (GetColor() == COLOR_RED) nCityNo++;   // ⑥
-    else                          nCityNo--;
-    weaponIdx = 0;   // ⑦
-}
 ```
 
 在①处，`nCityNo` 记录武士当前所在城市编号，红方从 0 出发向右走，蓝方从 `N+1` 出发向左走。
@@ -331,15 +405,53 @@ void CWarrior::March()
 
 在③处，`weapons[MAX_WPS]` 最多持有 10 件武器，不用的槽位保持 `NULL`。
 
-在④处，`Runaway()` 和 `Yell()` 有默认实现（返回 `false`/空字符串），只有 lion 和 dragon 需要覆盖，其他子类无需理会。
+在④处，`Runaway()` 和 `Yell()` 有默认实现（返回 `false`/空字符串），只有 lion 和 dragon 需要覆盖，其他子类无需理会。构造函数、析构函数和各战斗方法只写了声明，函数体在后面各节逐一补上。
 
-在⑤处，`memset` 把武器数组全部初始化为 `NULL`，避免野指针。
+### 3.4.2　构造函数与析构函数
 
-在⑥处，`March()` 根据颜色决定移动方向，城市编号加一或减一。
+构造函数初始化所有字段并把武器数组清零；析构函数负责释放动态分配的武器对象：
 
-在⑦处，每次行军后将 `weaponIdx` 归零，使武器轮次从头开始——题目规定战斗开始前先重新排好武器顺序再使用。
+```cpp
+// warcraft3.cpp
+--snip--
+CWarrior::CWarrior(int nId_, int nStrength_, int nForce_, int nCityNo_,
+                   CHeadquarter * pHeadquarter_) :
+    nId(nId_), nStrength(nStrength_), nForce(nForce_),
+    nCityNo(nCityNo_), pHeadquarter(pHeadquarter_), weaponIdx(0)
+{
+    memset(weapons, 0, sizeof(weapons));   // ①
+}
 
-### 3.4.2　排序武器
+CWarrior::~CWarrior() {
+    for (int i = 0; i < MAX_WPS; ++i)
+        if (weapons[i]) delete weapons[i];   // ②
+}
+```
+
+在①处，`memset` 把武器数组全部初始化为 `NULL`，避免野指针——武器是按需通过 `NewWeapon()` 创建后挂入数组的，不能让空槽位残留随机值。
+
+在②处，遍历武器数组，依次释放每个武士持有的武器。规则和上一章一样：`new` 出来的东西最终必须 `delete`，析构函数在武士对象生命期结束时自动被调用。
+
+### 3.4.3　`March()`：移动逻辑
+
+`March()` 在每小时第 10 分钟被调用，武士向对方方向前进一步：
+
+```cpp
+// warcraft3.cpp
+--snip--
+void CWarrior::March()
+{
+    if (GetColor() == COLOR_RED) nCityNo++;   // ①
+    else                          nCityNo--;
+    weaponIdx = 0;   // ②
+}
+```
+
+在①处，`March()` 根据颜色决定移动方向：红方城市编号加一，蓝方减一。
+
+在②处，每次行军后将 `weaponIdx` 归零，使武器轮次从头开始——题目规定战斗开始前先重新排好武器顺序再使用。
+
+### 3.4.4　排序武器
 
 武器在战斗前和被缴获时需要按不同规则排序：
 
@@ -379,9 +491,9 @@ void CWarrior::SortWeapons(bool forTaken)
 
 在⑤处，`WpCompare2` 与 `WpCompare` 的区别是 arrow 排序方向相反——缴获敌方武器时，优先缴获**没用过的箭**（用过 0 次的先缴）。`forTaken = true` 时使用这个规则。
 
-### 3.4.3　`Attack()` 与 `FightBack()`
+### 3.4.5　`Attack()`：循环使用武器
 
-战斗的核心是两个方法的配合：攻击方把自己所有武器轮流用一遍，每用一件武器后让对方还击一次：
+攻击方把自己所有武器轮流用一遍，每用一件后让对方还击：
 
 ```cpp
 // warcraft3.cpp
@@ -414,28 +526,6 @@ int CWarrior::Attack(CWarrior * pEnemy)
     }
     return 0;
 }
-
-void CWarrior::FightBack(CWarrior * pEnemy)
-{
-    if (weaponIdx == MAX_WPS) return;   // ⑥
-    bool done = false;
-    int i = weaponIdx;
-    for (; i < MAX_WPS; ++i) {
-        if (weapons[i]) {
-            done = true;
-            int tmp = weapons[i]->Attack(pEnemy);
-            if (tmp == 0) { delete weapons[i]; weapons[i] = NULL; }
-            break;
-        }
-    }
-    if (done)
-        weaponIdx = (i + 1) % MAX_WPS;   // ⑦
-    else {
-        weaponIdx = 0;
-        // 从头再找一遍，若仍无武器则 weaponIdx = MAX_WPS 标记用尽
-        ...
-    }
-}
 ```
 
 在①处，每轮攻击前记录敌人当前的生命值 `tmps`，用于判断本轮是否发生了变化。
@@ -448,13 +538,43 @@ void CWarrior::FightBack(CWarrior * pEnemy)
 
 在⑤处，若整轮扫描所有武器都没有产生任何变化，说明双方陷入平局僵局，跳出循环。
 
-在⑥处，`weaponIdx == MAX_WPS` 是特殊标记，表示武器已全部耗尽，直接返回不再还击。
+### 3.4.6　`FightBack()`：被动还击
 
-在⑦处，`FightBack` 每次只用当前轮次的一件武器，用完后 `weaponIdx` 移到下一格，下次还击从这里继续——这实现了"双方交替使用武器"的规则。
+每次攻击方用完一件武器后，立即触发对方的 `FightBack()`——还击只用当前轮次的一件武器：
 
-### 3.4.4　缴获武器：`TakeEnemyWeapons()`
+```cpp
+// warcraft3.cpp
+--snip--
+void CWarrior::FightBack(CWarrior * pEnemy)
+{
+    if (weaponIdx == MAX_WPS) return;   // ①
+    bool done = false;
+    int i = weaponIdx;
+    for (; i < MAX_WPS; ++i) {
+        if (weapons[i]) {
+            done = true;
+            int tmp = weapons[i]->Attack(pEnemy);
+            if (tmp == 0) { delete weapons[i]; weapons[i] = NULL; }
+            break;
+        }
+    }
+    if (done)
+        weaponIdx = (i + 1) % MAX_WPS;   // ②
+    else {
+        weaponIdx = 0;
+        // 从头再找一遍，若仍无武器则 weaponIdx = MAX_WPS 标记用尽
+        ...
+    }
+}
+```
 
-战斗结束后，胜方缴获败方的武器；wolf 在战斗前也可以抢武器：
+在①处，`weaponIdx == MAX_WPS` 是特殊标记，表示武器已全部耗尽，直接返回不再还击。
+
+在②处，`FightBack` 每次只用当前轮次的一件武器，用完后 `weaponIdx` 移到下一格，下次还击从这里继续——这实现了"双方交替使用武器"的规则。
+
+### 3.4.7　缴获武器：`TakeEnemyWeapons()`——wolf 分支
+
+`TakeEnemyWeapons()` 处理两种场景：wolf 在战前抢武器，以及战后胜方缴获。先来看函数的开头和 wolf 分支：
 
 ```cpp
 // warcraft3.cpp
@@ -488,7 +608,26 @@ string CWarrior::TakeEnemyWeapons(CWarrior * pEnemy, bool beforeFight)
             sprintf(tmp, "%d %s", wolfget, CWeapon::Names[nKindNo]);
             retVal = tmp;
         }
-    } else {   // ⑤  战斗结束后缴获
+    }
+    --snip--
+```
+
+在①处，先在自己的武器数组里找第一个空槽 `i`。
+
+在②处，若已经满了（10 件），直接放弃缴获，不会超出上限。
+
+在③处，`beforeFight = true` 代表 wolf 抢武器：只抢敌人编号**最小的那种**武器，若有多件则全抢，但不超过自己的 10 件上限。
+
+在④处，把武器的 `master` 指针改指向新的拥有者——否则武器的 `GetForce()` 还会按照原主人的攻击力计算。
+
+### 3.4.8　缴获武器：`TakeEnemyWeapons()`——战后分支（接上一小节）
+
+接上一小节，补上战斗结束后胜方统一缴获的逻辑：
+
+```cpp
+// warcraft3.cpp（接上）
+    --snip--
+    } else {   // ①  战斗结束后缴获
         pEnemy->SortWeapons(true);
         for (int k = 0; i < MAX_WPS && k < MAX_WPS; ++k) {
             if (pEnemy->weapons[k]) {
@@ -503,15 +642,7 @@ string CWarrior::TakeEnemyWeapons(CWarrior * pEnemy, bool beforeFight)
 }
 ```
 
-在①处，先在自己的武器数组里找第一个空槽 `i`。
-
-在②处，若已经满了（10 件），直接放弃缴获，不会超出上限。
-
-在③处，`beforeFight = true` 代表 wolf 抢武器：只抢敌人编号**最小的那种**武器，若有多件则全抢，但不超过自己的 10 件上限。
-
-在④处，把武器的 `master` 指针改指向新的拥有者——否则武器的 `GetForce()` 还会按照原主人的攻击力计算。
-
-在⑤处，普通胜方缴获时使用 `WpCompare2` 排序（优先缴获没用过的箭），再将所有能放下的武器一并取走。
+在①处，普通胜方缴获时使用 `WpCompare2` 排序（优先缴获没用过的箭），再将所有能放下的武器一并取走。最后调用 `SortWeapons()` 整理自己的武器数组，使后续战斗时武器顺序正确。
 
 ## 3.5　各武士子类的特殊行为
 
@@ -714,9 +845,9 @@ void CHeadquarter::WolfsRob()
 
 在②处，若同城敌人也是 wolf，则双方都不抢（wolf 不抢 wolf）。`TakeEnemyWeapons(p, true)` 以 `beforeFight = true` 调用，返回描述字符串（如 `"3 bomb"`），若返回非空则记录事件。
 
-### 3.6.5　`WarriorsAttack()`
+### 3.6.5　进攻时机：确定先后手
 
-每小时第 40 分是战斗时刻，奇数城市红方先攻，偶数城市蓝方先攻：
+每小时第 40 分是战斗时刻，奇数城市红方先攻，偶数城市蓝方先攻。下面先来看如何确定当前城市由谁先攻，以及如何发起攻击：
 
 ```cpp
 // warcraft3.cpp
@@ -736,9 +867,23 @@ void CHeadquarter::WarriorsAttack()
             if (bShouldAttack) {
                 pAttacker->Attack(p);   // ②
                 p->Attack(pAttacker);
+                --snip--
+```
+
+在①处，红方的 `WarriorsAttack()` 只处理奇数城市（红方先攻），蓝方的只处理偶数城市（蓝方先攻）。这样红蓝各自调用一次，每座城市恰好被处理一次。
+
+在②处，`bShouldAttack` 为真时，先攻方调用 `Attack()` 主动出击，后攻方也立即调用 `Attack()` 反击；战斗的所有细节都封装在 `Attack()` 里，`WarriorsAttack()` 只负责触发。
+
+### 3.6.6　先攻方死亡的处理（接上一小节）
+
+接上一小节，战斗结束后先处理先攻方死亡的情况：
+
+```cpp
+// warcraft3.cpp（接上）
+                --snip--
                 char szTmp[200];
                 if (pAttacker->nStrength <= 0) {
-                    if (p->GetStrength() <= 0) {
+                    if (p->GetStrength() <= 0) {       // ①
                         if (pAttacker->GetColor() == COLOR_RED)
                             sprintf(szTmp, "both %s and %s died in city %d",
                                     pAttacker->GetName().c_str(),
@@ -747,20 +892,35 @@ void CHeadquarter::WarriorsAttack()
                             sprintf(szTmp, "both %s and %s died in city %d",
                                     p->GetName().c_str(),
                                     pAttacker->GetName().c_str(), nCityNo);
-                    } else {   // ③
+                    } else {   // ②
                         sprintf(szTmp, "%s killed %s in city %d remaining %d elements",
                                 p->GetName().c_str(),
                                 pAttacker->GetName().c_str(),
                                 nCityNo, p->GetStrength());
                         p->TakeEnemyWeapons(pAttacker);
                     }
-                } else if (p->GetStrength() <= 0) {   // ④
+                }
+                --snip--
+```
+
+在①处，先攻方与后攻方同时死亡，输出"both ... died"。红方名字在前、蓝方在后，因此需要根据 `pAttacker` 的颜色决定打印顺序。
+
+在②处，先攻方死亡而后攻方存活，后攻方杀死先攻方，输出"killed"并缴获武器。
+
+### 3.6.7　后攻方死亡与双方存活的处理（接上一小节）
+
+接上一小节，处理剩余两种结局，随后记录事件并触发欢呼：
+
+```cpp
+// warcraft3.cpp（接上）
+                --snip--
+                } else if (p->GetStrength() <= 0) {   // ①
                     sprintf(szTmp, "%s killed %s in city %d remaining %d elements",
                             pAttacker->GetName().c_str(),
                             p->GetName().c_str(),
                             nCityNo, pAttacker->GetStrength());
                     pAttacker->TakeEnemyWeapons(p);
-                } else {   // ⑤
+                } else {   // ②
                     if (pAttacker->GetColor() == COLOR_RED)
                         sprintf(szTmp, "both %s and %s were alive in city %d",
                                 pAttacker->GetName().c_str(),
@@ -774,24 +934,18 @@ void CHeadquarter::WarriorsAttack()
                 string s = pAttacker->Yell();
                 if (s != "") AddEvent(EVENT_YELL, nCityNo, pAttacker->GetColor(), s);
                 s = p->Yell();
-                if (s != "") AddEvent(EVENT_YELL, nCityNo, p->GetColor(), s);   // ⑥
+                if (s != "") AddEvent(EVENT_YELL, nCityNo, p->GetColor(), s);   // ③
             }
         }
     }
 }
 ```
 
-在①处，红方的 `WarriorsAttack()` 只处理奇数城市（红方先攻），蓝方的只处理偶数城市（蓝方先攻）。这样红蓝各自调用一次，每座城市恰好被处理一次。
+在①处，后攻方死亡而先攻方存活，逻辑与上一节的②对称——先攻方杀死后攻方并缴获武器。
 
-在②处，双方各自调用 `Attack()`——先攻方攻击一轮，后攻方再攻击一轮。
+在②处，双方都活着，输出"were alive"。
 
-在③处，先攻方死亡而后攻方存活，则后攻方杀死先攻方，输出"killed"并缴获武器。
-
-在④处，后攻方死亡而先攻方存活，逻辑对称。
-
-在⑤处，双方都活着，输出"were alive"。
-
-在⑥处，战斗结束后依次检查双方的 `Yell()`，dragon 存活时会追加一条欢呼事件。
+在③处，战斗结束后依次检查双方的 `Yell()`，dragon 存活时会追加一条欢呼事件。
 
 ## 3.7　主函数
 

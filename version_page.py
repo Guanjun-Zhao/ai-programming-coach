@@ -1,5 +1,5 @@
 """
-版本页：左侧任务树 + 中列 code.cpp + 右侧 Tab（AI 教练 / 样例库）。
+版本页：左侧任务树 + 中列 code.cpp + 右侧 AI 对话区。
 """
 
 from __future__ import annotations
@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QPlainTextEdit,
     QPushButton,
-    QTabWidget,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -19,7 +18,6 @@ from PyQt6.QtWidgets import (
 )
 
 from chat_widget import ChatWidget
-from sample_library import SampleLibraryWidget
 
 import data_manager
 import sections_loader
@@ -59,12 +57,6 @@ class VersionPage(QWidget):
       first_tid,
       program_loader=lambda: self._code_editor.toPlainText(),
     )
-    self._samples = SampleLibraryWidget()
-    self._samples.set_context(version_id, first_tid)
-
-    self._tabs = QTabWidget()
-    self._tabs.addTab(self._chat, "AI 教练")
-    self._tabs.addTab(self._samples, "样例库")
 
     left = QVBoxLayout()
     left.addWidget(QLabel("任务清单"))
@@ -75,7 +67,7 @@ class VersionPage(QWidget):
     center.addWidget(self._code_editor)
 
     right = QVBoxLayout()
-    right.addWidget(self._tabs)
+    right.addWidget(self._chat)
 
     body = QHBoxLayout()
     body.addLayout(left, 1)
@@ -241,4 +233,3 @@ class VersionPage(QWidget):
     if not isinstance(tid_raw, str) or not tid_raw:
       return
     self._chat.set_task(tid_raw)
-    self._samples.set_context(self._version_id, tid_raw)
